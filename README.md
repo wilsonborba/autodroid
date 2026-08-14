@@ -1,20 +1,14 @@
-# autodroid-clone
+# autodroid
 
-Repositório inicial do projeto `autodroid-clone`.
+Base do projeto `autodroid` para Android automation com arquitetura organizada em `core`, `dal`, `domain` e `presentation`.
 
 ## Estrutura
-
-A base do projeto segue uma arquitetura organizada em:
 
 - `lib/core`
 - `lib/dal`
 - `lib/domain`
 - `lib/presentation`
 
-## Git Flow
+## Status
 
-Branches base criadas:
-
-- `main`
-- `development`
-- `feature/main`
+Scaffold inicial da Sprint 1.
