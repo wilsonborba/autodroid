@@ -8,3 +8,6 @@ __pycache__/
 build/
 dist/
 node_modules/
+output/
+var/
+.alembic/
