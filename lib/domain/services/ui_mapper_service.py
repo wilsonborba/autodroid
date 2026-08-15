@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +11,7 @@ from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
 from lib.domain.services.mapper_engine import MapperEngine
+from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
 from lib.domain.services.navigation_context_service import NavigationContextService
 
@@ -31,6 +31,7 @@ class UiMapperService(MapperEngine):
         self.ui = UiAutomatorAdapter(settings.android_serial)
         self.navigation_context = NavigationContextService(self.adb)
         self.mode_service = MapperModeService()
+        self.fingerprint_service = MapperFingerprintService()
 
     def run(self, config: MapperRunConfig) -> dict[str, Any]:
         limits = self.mode_service.get_limits(config.mode)
@@ -50,7 +51,7 @@ class UiMapperService(MapperEngine):
             mapper_session.status = MapperSessionStatus.RUNNING
             mapper_session.started_at = utc_now()
 
-            state = {"actions_executed": 0, "screens_recorded": 0, "scrolls_used": 0}
+            state = {"actions_executed": 0, "screens_recorded": 0, "scrolls_used": 0, "revisited_screens": 0}
             self._explore(repository, mapper_session.id, depth=0, state=state, max_depth=limits.max_depth, max_actions=limits.max_actions, max_scrolls=limits.max_scrolls)
 
             mapper_session.status = MapperSessionStatus.COMPLETED
@@ -62,14 +63,22 @@ class UiMapperService(MapperEngine):
                 "screens_recorded": state["screens_recorded"],
                 "actions_executed": state["actions_executed"],
                 "scrolls_used": state["scrolls_used"],
+                "revisited_screens": state["revisited_screens"],
                 "status": mapper_session.status.value,
             }
 
-    def _explore(self, repository: SqlAlchemyMapperRepository, session_id: int, *, depth: int, state: dict[str, int], max_depth: int, max_actions: int, max_scrolls: int) -> None:
+    def _explore(self, repository: SqlAlchemyMapperRepository, session_id: int, *, depth: int, state: dict[str, int], max_depth: int, max_actions: int, max_scrolls: int) -> int | None:
         nodes = self.ui.dump_nodes()
+        fingerprint = self.fingerprint_service.fingerprint(nodes)
+        existing_screen = repository.find_screen_by_fingerprint(session_id, fingerprint)
+        if existing_screen is not None:
+            repository.increment_screen_visit_count(existing_screen.id)
+            state["revisited_screens"] += 1
+            return existing_screen.id
+
         screen = repository.create_screen(
             session_id=session_id,
-            fingerprint=self._basic_fingerprint(nodes),
+            fingerprint=fingerprint,
             screen_key=f"screen-{state['screens_recorded'] + 1}",
             depth=depth,
             ordinal=state["screens_recorded"],
@@ -100,7 +109,7 @@ class UiMapperService(MapperEngine):
             )
 
         if depth >= max_depth:
-            return
+            return screen.id
 
         candidates = self._extract_candidates(nodes)
         for index, candidate in enumerate(candidates):
@@ -125,21 +134,12 @@ class UiMapperService(MapperEngine):
             action.success = success
             state["actions_executed"] += 1
             if success:
-                next_nodes = self.ui.dump_nodes()
-                next_screen = repository.create_screen(
-                    session_id=session_id,
-                    fingerprint=self._basic_fingerprint(next_nodes),
-                    screen_key=f"screen-{state['screens_recorded'] + 1}",
-                    depth=depth + 1,
-                    ordinal=state["screens_recorded"],
-                    metadata_json={"node_count": len(next_nodes)},
-                )
-                state["screens_recorded"] += 1
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0)
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
                     action_id=action.id,
-                    to_screen_id=next_screen.id,
+                    to_screen_id=to_screen_id,
                     result_type="clicked",
                 )
                 self.adb.press_back()
@@ -156,6 +156,8 @@ class UiMapperService(MapperEngine):
             self.ui.swipe_up()
             state["scrolls_used"] += 1
             self._explore(repository, session_id, depth=depth, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0)
+
+        return screen.id
 
     def _extract_candidates(self, nodes: list[dict[str, Any]]) -> list[MapperActionCandidate]:
         candidates: list[MapperActionCandidate] = []
@@ -174,21 +176,6 @@ class UiMapperService(MapperEngine):
                 )
             )
         return candidates
-
-    def _basic_fingerprint(self, nodes: list[dict[str, Any]]) -> str:
-        normalized = [
-            "|".join(
-                [
-                    str(node.get("resource_id") or ""),
-                    str(node.get("text") or ""),
-                    str(node.get("content_desc") or ""),
-                    str(node.get("class_name") or ""),
-                ]
-            )
-            for node in nodes[:120]
-        ]
-        normalized.sort()
-        return hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
 
     def _node_key(self, node: dict[str, Any], index: int) -> str:
         return f"{index}:{node.get('resource_id') or ''}:{node.get('text') or ''}:{node.get('content_desc') or ''}:{node.get('bounds') or ''}"

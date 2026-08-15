@@ -49,6 +49,7 @@ class FakeRepo:
     def __init__(self) -> None:
         self.session_id = 1
         self.screen_id = 0
+        self.fingerprints = {}
         self.action_id = 0
         self.sessions = []
         self.screens = []
@@ -65,9 +66,16 @@ class FakeRepo:
 
     def create_screen(self, **kwargs):
         self.screen_id += 1
-        screen = type('Screen', (), {'id': self.screen_id})()
+        screen = type('Screen', (), {'id': self.screen_id, 'visit_count': 1})()
         self.screens.append(kwargs)
+        self.fingerprints[kwargs['fingerprint']] = screen
         return screen
+
+    def find_screen_by_fingerprint(self, session_id: int, fingerprint: str):
+        return self.fingerprints.get(fingerprint)
+
+    def increment_screen_visit_count(self, screen_id: int):
+        return type('Screen', (), {'id': screen_id, 'visit_count': 2})()
 
     def create_node(self, **kwargs):
         node = type('Node', (), {'id': len(self.nodes) + 1})()
@@ -100,7 +108,9 @@ def test_ui_mapper_service_runs_light_mode_with_basic_capture(monkeypatch) -> No
     service.ui = FakeUi()
     service.navigation_context = FakeNav()
     from lib.domain.services.mapper_mode_service import MapperModeService
+    from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
     service.mode_service = MapperModeService()
+    service.fingerprint_service = MapperFingerprintService()
 
     fake_repo = FakeRepo()
     monkeypatch.setattr('lib.domain.services.ui_mapper_service.session_scope', lambda: FakeSessionScope())
@@ -110,5 +120,6 @@ def test_ui_mapper_service_runs_light_mode_with_basic_capture(monkeypatch) -> No
 
     assert result['package_name'] == 'com.linkedin.android'
     assert result['actions_executed'] == 1
+    assert result['revisited_screens'] >= 0
     assert len(fake_repo.screens) >= 1
     assert service.navigation_context.prepared == ['com.linkedin.android']
