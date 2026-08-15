@@ -42,6 +42,21 @@ class UiAutomatorAdapter:
                 return True
         return False
 
+    def click_first_by_text_or_description_contains(self, *candidates: str) -> bool:
+        nodes = self.dump_nodes()
+        for candidate in candidates:
+            lowered_candidate = candidate.lower()
+            for node in nodes:
+                text = str(node.get("text", "")).strip()
+                content_desc = str(node.get("content_desc", "")).strip()
+                if text and lowered_candidate in text.lower():
+                    if self.click_first_by_text_or_description(text):
+                        return True
+                if content_desc and lowered_candidate in content_desc.lower():
+                    if self.click_first_by_text_or_description(content_desc):
+                        return True
+        return False
+
     def dump_nodes(self) -> list[dict[str, Any]]:
         hierarchy = self.device.dump_hierarchy(compressed=False)
         root = et.fromstring(hierarchy)
