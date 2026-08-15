@@ -40,6 +40,7 @@ class MapperScreen(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("mapper_sessions.id", ondelete="CASCADE"), nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    structural_signature: Mapped[str] = mapped_column(String(128), nullable=False)
     screen_key: Mapped[str] = mapped_column(String(160), nullable=False)
     depth: Mapped[int] = mapped_column(Integer, nullable=False)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
