@@ -27,15 +27,8 @@ class LinkedInAdapter:
             self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
         else:
             self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
-        profile_opened = self.ui.click_first_by_text_or_description(
-            "Meu perfil",
-            "Perfil",
-            "Profile",
-            "Me",
-            "My Profile",
-            "My Profile and Communities",
-            "Menu button: Access my profile and other navigation links",
-        )
+
+        profile_opened = self._open_profile_entrypoint()
 
         scrolls = int(payload.get("scrolls", 2))
         screenshot_dir = self.settings.output_dir / "screenshots"
@@ -67,6 +60,32 @@ class LinkedInAdapter:
             write_json(output_path, result)
         return result
 
+    def _open_profile_entrypoint(self) -> bool:
+        if self.ui.click_first_by_text_or_description(
+            "Meu perfil",
+            "Perfil",
+            "My Profile",
+            "View Profile",
+            "Ver perfil",
+        ):
+            return True
+
+        menu_opened = self.ui.click_first_by_text_or_description_contains(
+            "access my profile",
+            "my profile and communities",
+            "profile and other navigation links",
+        )
+        if menu_opened and self.ui.click_first_by_text_or_description(
+            "My Profile",
+            "View Profile",
+            "Meu perfil",
+            "Ver perfil",
+            "Profile",
+        ):
+            return True
+
+        return False
+
     def _ensure_device_ready(self) -> None:
         if self.adb.get_state() != "device":
             raise RuntimeError("ADB device is not ready")
@@ -96,7 +115,7 @@ class LinkedInAdapter:
 
     @staticmethod
     def _guess_name(lines: list[str]) -> str | None:
-        ignored = {"LinkedIn", "Meu perfil", "Perfil", "Profile", "Me"}
+        ignored = {"LinkedIn", "Meu perfil", "Perfil", "Profile", "Me", "My Profile"}
         for line in lines[:12]:
             if line in ignored:
                 continue
