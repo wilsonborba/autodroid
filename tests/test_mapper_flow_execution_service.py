@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+import pytest
+from sqlalchemy import select, text
 
 from lib.dal.local.database import SessionLocal
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
@@ -9,6 +10,59 @@ from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowFailure, M
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode
 from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
 from lib.domain.services.mapper_route_planner_service import RestartOption
+
+
+@pytest.fixture(autouse=True)
+def _clean_failures():
+    # this project's tests share the real dev DB (no per-test isolation); the failure-recording
+    # tests count rows for a fixed package_name, so a row left behind by a previous run would
+    # make a fresh run see more failures than it actually caused itself.
+    with SessionLocal() as session:
+        session.execute(text("DELETE FROM mapper_flow_failures"))
+        session.commit()
+
+
+def _seed_gap_graph(session, *, package_name: str, with_direct_edge: bool):
+    """root has two children: `screen_c` (what "step 1" leads to) and `screen_a` (what "step 2"
+    expects to start from); `screen_a` also leads to `screen_b`. With `with_direct_edge`, a
+    direct `screen_c -> screen_a` transition exists (a real gap the route planner can bridge
+    without restarting); without it, reaching `screen_a` requires a restart."""
+    repository = SqlAlchemyMapperRepository(session)
+    mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=3, max_actions=20, max_scrolls=0)
+    root = repository.create_screen(session_id=mapper_session.id, fingerprint="root", screen_key="root", depth=0, ordinal=0)
+    screen_a = repository.create_screen(session_id=mapper_session.id, fingerprint="a", screen_key="a", depth=1, ordinal=1)
+    screen_b = repository.create_screen(session_id=mapper_session.id, fingerprint="b", screen_key="b", depth=2, ordinal=2)
+    screen_c = repository.create_screen(session_id=mapper_session.id, fingerprint="c", screen_key="c", depth=1, ordinal=3)
+
+    def add_edge(from_screen, to_screen, label, bounds):
+        node = repository.create_node(screen_id=from_screen.id, node_key=f"node-{label}", text=label, clickable=True, bounds=bounds)
+        action = repository.create_action(session_id=mapper_session.id, screen_id=from_screen.id, node_id=node.id, action_key=f"click:{label}", action_type="click", label=label, safety=MapperActionSafety.SAFE)
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=from_screen.id, action_id=action.id, to_screen_id=to_screen.id, result_type="clicked")
+        return action
+
+    action_root_to_c = add_edge(root, screen_c, "GoC", "[0,0][10,10]")
+    add_edge(root, screen_a, "GoA", "[0,20][10,30]")  # the restart-fallback ancestor path
+    action_a_to_b = add_edge(screen_a, screen_b, "GoB", "[0,40][10,50]")
+    if with_direct_edge:
+        add_edge(screen_c, screen_a, "Bridge", "[0,60][10,70]")
+
+    return mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b
+
+
+def _gap_flow_and_steps(mapper_session, root, screen_a, action_root_to_c, action_a_to_b, package_name: str):
+    flow = MapperFlow(name="Gap flow", package_name=package_name)
+    flow.id = 1
+    flow.source_session_id = mapper_session.id
+
+    step_one = make_step(id=901, package_name=package_name, action_type="click", selector_json={"candidates": ["GoC"]})
+    step_one.source_screen_id = root.id
+    step_one.source_action_id = action_root_to_c.id
+
+    step_two = make_step(id=902, package_name=package_name, action_type="click", selector_json={"candidates": ["GoB"]})
+    step_two.source_screen_id = screen_a.id
+    step_two.source_action_id = action_a_to_b.id
+
+    return flow, [step_one, step_two]
 
 
 def _failures_for(package_name: str) -> list[MapperFlowFailure]:
@@ -399,3 +453,60 @@ def test_navigate_restarts_and_replays_ancestor_steps_when_no_direct_path_exists
     assert result["success"] is True
     assert service.navigation_context.prepared == ["com.norestartpath.testapp"]
     assert service.ui.clicked_exact == [("Home",)]
+
+
+def test_run_flow_does_not_bridge_when_steps_are_already_adjacent() -> None:
+    package_name = "com.adjacentflow.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=False)
+        session.commit()
+        flow, steps = _gap_flow_and_steps(mapper_session, root, screen_a, action_root_to_c, action_a_to_b, package_name)
+        # step 1 now leads straight into step 2's expected screen: no gap to bridge
+        steps[1].source_screen_id = screen_c.id
+
+    service = build_service()
+    result = service.run_flow(flow, steps)
+
+    assert [step_result["success"] for step_result in result["steps"]] == [True, True]
+    assert service.ui.clicked_bounds == []  # navigate() never ran, nothing to bridge
+    assert service.navigation_context.prepared == []
+    assert service.ui.clicked_exact == [("GoC",), ("GoB",)]
+
+
+def test_run_flow_bridges_a_real_gap_using_the_route_planner() -> None:
+    package_name = "com.bridgedflow.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=True)
+        session.commit()
+        flow, steps = _gap_flow_and_steps(mapper_session, root, screen_a, action_root_to_c, action_a_to_b, package_name)
+
+    service = build_service()
+    result = service.run_flow(flow, steps)
+
+    assert [step_result["success"] for step_result in result["steps"]] == [True, True]
+    assert service.ui.clicked_bounds == ["[0,60][10,70]"]  # the bridging edge, walked once
+    assert service.navigation_context.prepared == []  # a direct path never needs a restart
+    assert service.ui.clicked_exact == [("GoC",), ("GoB",)]  # both steps still ran normally
+
+    with SessionLocal() as session:
+        transitions = SqlAlchemyMapperRepository(session).list_transitions(mapper_session.id)
+        bridge_transition = next(t for t in transitions if t.from_screen_id == screen_c.id and t.to_screen_id == screen_a.id)
+        perf = SqlAlchemyMapperRoutePerformanceRepository(session).get_transition_performance(bridge_transition.id)
+        assert perf is not None and perf.sample_count == 1  # the bridging run was learned from
+
+
+def test_run_flow_falls_back_to_restart_when_gap_has_no_direct_path() -> None:
+    package_name = "com.restartflow.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=False)
+        session.commit()
+        flow, steps = _gap_flow_and_steps(mapper_session, root, screen_a, action_root_to_c, action_a_to_b, package_name)
+
+    service = build_service()
+    result = service.run_flow(flow, steps)
+
+    assert [step_result["success"] for step_result in result["steps"]] == [True, True]
+    assert service.navigation_context.prepared == [package_name]  # had to restart the app
+    # "GoA" is the auto-resolved ancestor replayed to reach step 2's screen, then step 2 itself
+    assert ("GoA",) in service.ui.clicked_exact
+    assert ("GoB",) in service.ui.clicked_exact

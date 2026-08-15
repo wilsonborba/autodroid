@@ -16,6 +16,7 @@ from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep
 from lib.domain.models.mapper_types import MapperActionSafety, MapperFlowFailureType
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
+from lib.domain.services.mapper_flow_service import MapperFlowService
 from lib.domain.services.mapper_route_planner_service import RESTART, MapperRoutePlannerService, RestartOption
 from lib.domain.services.mapper_safety_service import MapperSafetyService
 from lib.domain.services.navigation_context_service import NavigationContextService
@@ -60,9 +61,23 @@ class MapperFlowExecutionService:
     def run_flow(self, flow: MapperFlow, steps: list[MapperFlowStep], *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
         """`steps` is the ordered list of this flow's steps (a reusable step can belong to
         several flows, so ordering/membership is resolved by the caller via
-        `SqlAlchemyMapperFlowRepository.ordered_steps`, not derived from `flow` itself)."""
+        `SqlAlchemyMapperFlowRepository.ordered_steps`, not derived from `flow` itself).
+
+        Before each step, if the device's last known screen isn't that step's expected starting
+        screen, `navigate()` (issue #24's route planner) is used to bridge the gap first (issue
+        #26). The starting screen is only known once a previous step in this same run succeeded
+        and its outcome screen could be resolved, so the very first step, and any step right
+        after one whose outcome is unknown, always just runs as-is, exactly like before this
+        wiring existed."""
         self.logger.info("Running flow %s (%s) with %s steps", flow.id, flow.name, len(steps))
-        results = [self.run_step(step, flow_id=flow.id, skip_dangerous_actions=skip_dangerous_actions) for step in steps]
+        results = []
+        current_screen_id: int | None = None
+        for step in steps:
+            if current_screen_id is not None and step.source_screen_id is not None and step.source_screen_id != current_screen_id and flow.source_session_id is not None:
+                self._bridge_gap(flow, current_screen_id, step.source_screen_id)
+            result = self.run_step(step, flow_id=flow.id, skip_dangerous_actions=skip_dangerous_actions)
+            results.append(result)
+            current_screen_id = self._resolve_screen_after_step(step, result)
         self.logger.info("Finished flow %s (%s)", flow.id, flow.name)
         return {
             "flow_id": flow.id,
@@ -70,6 +85,28 @@ class MapperFlowExecutionService:
             "package_name": flow.package_name,
             "steps": results,
         }
+
+    def _bridge_gap(self, flow: MapperFlow, current_screen_id: int, target_screen_id: int) -> None:
+        with session_scope() as session:
+            root_screen_id, ancestor_steps = MapperFlowService(session).resolve_restart_plan(flow.package_name, target_screen_id)
+        restart_option = RestartOption(root_screen_id=root_screen_id, ancestor_step_ids=[step.id for step in ancestor_steps])
+        self.navigate(
+            package_name=flow.package_name,
+            session_id=flow.source_session_id,
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            restart_option=restart_option,
+            restart_steps=ancestor_steps,
+        )
+
+    def _resolve_screen_after_step(self, step: MapperFlowStep, result: dict[str, Any]) -> int | None:
+        # only trust a screen we're confident about: a failed step, or one with no known
+        # provenance, means the next step just runs as-is, same as before this wiring existed
+        if not result.get("success") or step.source_action_id is None:
+            return None
+        with session_scope() as session:
+            transition = SqlAlchemyMapperRepository(session).find_transition_by_action(step.source_action_id)
+            return transition.to_screen_id if transition is not None else None
 
     def navigate(
         self,
@@ -84,10 +121,9 @@ class MapperFlowExecutionService:
         """Bridges the gap between where the device is now and where a mapped step needs to
         start, deciding at runtime between a direct path through the mapped graph and a restart
         (issue #24): this is the concrete "RoutePlanner -> Worker executes -> measure -> learn"
-        loop from the issue's architecture. `run_flow` doesn't call this automatically for every
-        step yet (that needs `run_flow` to track "current screen" via each step's resolved
-        transition, a follow-up wiring pass); this method is the working, tested integration
-        point a caller (or a future `run_flow` enhancement) uses once it has both screen ids."""
+        loop from the issue's architecture. Called automatically by `run_flow` whenever it knows
+        the current screen and it doesn't match the next step's expected one (issue #26); also
+        callable directly by anything else that already has both screen ids."""
         if current_screen_id == target_screen_id:
             return {"strategy_type": "already_there", "reason": "same_screen", "success": True, "duration_ms": 0.0}
 
