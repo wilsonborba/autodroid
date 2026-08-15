@@ -10,7 +10,10 @@ from alembic.config import Config
 
 from lib.bootstrap import create_dispatcher, create_api_app, get_session, get_settings
 from lib.domain.services.job_queue_service import JobQueueService
+from lib.domain.models.mapper_types import MapperMode, MapperRunConfig
 from lib.domain.services.worker_service import WorkerService
+from lib.domain.services.ui_mapper_service import UiMapperService
+from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.presentation.cli.formatters.job_formatter import JobFormatter
 from lib.presentation.cli.outputs.json_output import JsonOutput
 
@@ -18,9 +21,11 @@ app = typer.Typer(help="Autodroid CLI")
 jobs_app = typer.Typer(help="Job operations")
 worker_app = typer.Typer(help="Worker operations")
 db_app = typer.Typer(help="Database operations")
+mapper_app = typer.Typer(help="Mapper operations")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(worker_app, name="worker")
 app.add_typer(db_app, name="db")
+app.add_typer(mapper_app, name="mapper")
 
 
 def _parse_json_payload(raw: str | None) -> dict:
@@ -155,3 +160,47 @@ def serve_api(host: str = "127.0.0.1", port: int = 8000) -> None:
     import uvicorn
 
     uvicorn.run(create_api_app(), host=host, port=port)
+
+
+@mapper_app.command("run")
+def run_mapper(package_name: str, mode: str = "light", skip_dangerous_actions: bool = True) -> None:
+    try:
+        mapper_mode = MapperMode(mode)
+    except ValueError as exc:
+        raise typer.BadParameter(f"Invalid mapper mode: {mode}") from exc
+    result = UiMapperService(get_settings()).run(MapperRunConfig(package_name=package_name, mode=mapper_mode, skip_dangerous_actions=skip_dangerous_actions))
+    typer.echo(JsonOutput.render(result))
+
+
+@mapper_app.command("sessions")
+def list_mapper_sessions(limit: int = 50, as_json: bool = False) -> None:
+    with get_session() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        sessions = repository.list_sessions(limit=limit)
+        if as_json:
+            typer.echo(JsonOutput.render({"sessions": [{"id": item.id, "package_name": item.package_name, "mode": item.mode.value, "status": item.status.value} for item in sessions]}))
+            return
+        for item in sessions:
+            typer.echo(f"#{item.id} {item.package_name} [{item.mode.value}] {item.status.value}")
+
+
+@mapper_app.command("show")
+def show_mapper_session(session_id: int, as_json: bool = False) -> None:
+    with get_session() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.get_session(session_id)
+        if mapper_session is None:
+            raise typer.Exit(code=1)
+        payload = {
+            "id": mapper_session.id,
+            "package_name": mapper_session.package_name,
+            "mode": mapper_session.mode.value,
+            "status": mapper_session.status.value,
+            "max_depth": mapper_session.max_depth,
+            "max_actions": mapper_session.max_actions,
+            "max_scrolls": mapper_session.max_scrolls,
+        }
+        if as_json:
+            typer.echo(JsonOutput.render(payload))
+            return
+        typer.echo(str(payload))

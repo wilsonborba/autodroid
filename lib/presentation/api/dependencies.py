@@ -13,3 +13,10 @@ def get_settings():
 
 def get_session():
     return session_scope()
+
+
+from lib.domain.services.ui_mapper_service import UiMapperService
+
+
+def get_mapper_engine() -> UiMapperService:
+    return UiMapperService(_settings)

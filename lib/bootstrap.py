@@ -10,7 +10,9 @@ from lib.dal.local.database import SessionLocal, session_scope
 from lib.domain.adapters.linkedin.tasks.extract_profile_task import ExtractLinkedInProfileTask
 from lib.domain.services.automation_service import AutomationRegistryService
 from lib.domain.services.dispatcher_service import DispatcherService
+from lib.domain.services.ui_mapper_service import UiMapperService
 from lib.presentation.api.routes.jobs import router as jobs_router
+from lib.presentation.api.routes.mapper import router as mapper_router
 
 
 @lru_cache(maxsize=1)
@@ -47,4 +49,5 @@ def create_dispatcher() -> DispatcherService:
 def create_api_app() -> FastAPI:
     app = FastAPI(title="autodroid", version="0.1.0")
     app.include_router(jobs_router)
+    app.include_router(mapper_router)
     return app
