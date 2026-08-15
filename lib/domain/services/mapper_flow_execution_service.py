@@ -109,11 +109,16 @@ class MapperFlowExecutionService:
             transition = SqlAlchemyMapperRepository(session).find_transition_by_action(step.source_action_id)
             return transition.to_screen_id if transition is not None else None
 
+    # these never move the device to a different mapped screen on their own, so a target_screen_id
+    # that was navigated to for one of them is still accurate to report back as the result
+    READ_ONLY_ACTION_TYPES = {"dump_nodes", "screenshot", "ocr_extract", "wait"}
+
     def execute_on_demand(
         self,
         *,
         package_name: str,
         target_action_id: int | None = None,
+        target_screen_id: int | None = None,
         current_screen_id: int | None = None,
         action_type: str | None = None,
         selector: dict[str, Any] | None = None,
@@ -126,35 +131,57 @@ class MapperFlowExecutionService:
         the known ancestor chain otherwise, exactly the same gap-bridging `run_flow` already does
         between steps (#26), just for a single on-demand action instead of a whole Flow.
 
-        A raw action (`action_type` instead) runs against whatever's on screen right now, no
-        navigation attempted: for exploratory or OCR-driven interaction, where there's no mapped
-        destination to aim for in the first place (a `dump_nodes`/`screenshot`/`ocr_extract` read,
-        or a `click_bounds` on something just found that way)."""
-        if target_action_id is None:
-            if not action_type:
-                raise ValueError("Provide either target_action_id or action_type")
-            step = MapperFlowStep(package_name=package_name, action_type=action_type, selector_json=selector or {}, params_json=params)
+        A raw action (`action_type`) can optionally carry its own `target_screen_id`: when given,
+        it's navigated to first exactly the same way, so "read the profile" can't silently run
+        against whatever happens to be on screen if that's not actually the profile. Without
+        `target_screen_id`, it runs against wherever the device already is, no navigation: for a
+        raw action right after a `target_action_id` call already confirmed the screen, or a
+        generic dump/screenshot/OCR/click_bounds where there's no mapped destination to begin
+        with. `target_screen_id` pointing at something never mapped fails fast, there's nothing
+        to navigate to."""
+        if target_action_id is not None:
+            with session_scope() as session:
+                action = SqlAlchemyMapperRepository(session).get_action(target_action_id)
+                if action is None:
+                    raise ValueError(f"Mapper action {target_action_id} not found")
+                source_session_id = action.session_id
+                step = MapperFlowService(session).get_or_create_step_for_action(package_name, target_action_id)
+                step_source_screen_id = step.source_screen_id
+
+            if step_source_screen_id is not None:
+                self._ensure_screen(package_name, source_session_id, step_source_screen_id, current_screen_id)
             result = self.run_step(step)
-            return {**result, "resulting_screen_id": None}
+            resulting_screen_id = self._resolve_screen_after_step(step, result)
+            return {**result, "resulting_screen_id": resulting_screen_id}
 
-        with session_scope() as session:
-            action = SqlAlchemyMapperRepository(session).get_action(target_action_id)
-            if action is None:
-                raise ValueError(f"Mapper action {target_action_id} not found")
-            source_session_id = action.session_id
-            step = MapperFlowService(session).get_or_create_step_for_action(package_name, target_action_id)
-            step_source_screen_id = step.source_screen_id
+        if not action_type:
+            raise ValueError("Provide either target_action_id or action_type")
 
-        if step_source_screen_id is not None and step_source_screen_id != current_screen_id:
-            flow = MapperFlow(package_name=package_name, source_session_id=source_session_id)
-            if current_screen_id is not None:
-                self._bridge_gap(flow, current_screen_id, step_source_screen_id)
-            else:
-                self._relaunch_to_screen(flow, step_source_screen_id)
+        if target_screen_id is not None:
+            with session_scope() as session:
+                screen = SqlAlchemyMapperRepository(session).get_screen(target_screen_id)
+                if screen is None:
+                    raise ValueError(f"Mapper screen {target_screen_id} not found, nothing mapped to navigate to")
+                source_session_id = screen.session_id
+            self._ensure_screen(package_name, source_session_id, target_screen_id, current_screen_id)
 
+        step = MapperFlowStep(package_name=package_name, action_type=action_type, selector_json=selector or {}, params_json=params)
         result = self.run_step(step)
-        resulting_screen_id = self._resolve_screen_after_step(step, result)
+        resulting_screen_id = (
+            target_screen_id
+            if target_screen_id is not None and action_type in self.READ_ONLY_ACTION_TYPES and result.get("success")
+            else None
+        )
         return {**result, "resulting_screen_id": resulting_screen_id}
+
+    def _ensure_screen(self, package_name: str, source_session_id: int, target_screen_id: int, current_screen_id: int | None) -> None:
+        if target_screen_id == current_screen_id:
+            return
+        flow = MapperFlow(package_name=package_name, source_session_id=source_session_id)
+        if current_screen_id is not None:
+            self._bridge_gap(flow, current_screen_id, target_screen_id)
+        else:
+            self._relaunch_to_screen(flow, target_screen_id)
 
     def _relaunch_to_screen(self, flow: MapperFlow, target_screen_id: int) -> None:
         # no current_screen_id to route from at all, a relaunch always lands at the root, so this

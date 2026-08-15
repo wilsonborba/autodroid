@@ -22,6 +22,7 @@ def execute_action(payload: DeviceActionRequest):
         result = get_mapper_flow_execution_service().execute_on_demand(
             package_name=payload.package_name,
             target_action_id=payload.target_action_id,
+            target_screen_id=payload.target_screen_id,
             current_screen_id=payload.current_screen_id,
             action_type=payload.action_type,
             selector=payload.selector,

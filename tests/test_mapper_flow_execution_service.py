@@ -606,3 +606,57 @@ def test_execute_on_demand_requires_either_target_action_id_or_action_type() -> 
 
     with pytest.raises(ValueError):
         service.execute_on_demand(package_name="com.ondemand5.testapp")
+
+
+def test_execute_on_demand_raw_action_navigates_to_target_screen_first() -> None:
+    package_name = "com.ondemand6.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=True)
+        session.commit()
+        screen_a_id, screen_c_id = screen_a.id, screen_c.id
+
+    service = build_service()
+    result = service.execute_on_demand(package_name=package_name, action_type="dump_nodes", target_screen_id=screen_a_id, current_screen_id=screen_c_id)
+
+    assert result["success"] is True
+    assert service.ui.clicked_bounds == ["[0,60][10,70]"]  # bridged to screen_a via the direct edge
+    assert result["resulting_screen_id"] == screen_a_id  # dump_nodes is read-only, still there
+
+
+def test_execute_on_demand_raw_action_skips_navigation_when_already_there() -> None:
+    package_name = "com.ondemand7.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=False)
+        session.commit()
+        screen_a_id = screen_a.id
+
+    service = build_service()
+    result = service.execute_on_demand(package_name=package_name, action_type="dump_nodes", target_screen_id=screen_a_id, current_screen_id=screen_a_id)
+
+    assert result["success"] is True
+    assert service.ui.clicked_bounds == []
+    assert service.navigation_context.prepared == []
+
+
+def test_execute_on_demand_raw_action_fails_fast_for_unmapped_target_screen() -> None:
+    service = build_service()
+
+    with pytest.raises(ValueError):
+        service.execute_on_demand(package_name="com.ondemand8.testapp", action_type="dump_nodes", target_screen_id=999999)
+
+
+def test_execute_on_demand_click_type_raw_action_has_no_resulting_screen_id() -> None:
+    package_name = "com.ondemand9.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=False)
+        session.commit()
+        screen_a_id = screen_a.id
+
+    service = build_service()
+    result = service.execute_on_demand(
+        package_name=package_name, action_type="click_bounds", selector={"bounds": "[1,1][2,2]"},
+        target_screen_id=screen_a_id, current_screen_id=screen_a_id,
+    )
+
+    assert result["success"] is True
+    assert result["resulting_screen_id"] is None  # a click could have led anywhere, never assumed

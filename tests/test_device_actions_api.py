@@ -39,8 +39,8 @@ def test_execute_action_endpoint_calls_execute_on_demand(monkeypatch) -> None:
     assert response.json()["success"] is True
     assert response.json()["resulting_screen_id"] == 7
     assert fake.calls == [{
-        "package_name": "com.device.testapp", "target_action_id": 123, "current_screen_id": 5,
-        "action_type": None, "selector": None, "params": None,
+        "package_name": "com.device.testapp", "target_action_id": 123, "target_screen_id": None,
+        "current_screen_id": 5, "action_type": None, "selector": None, "params": None,
     }]
 
 
