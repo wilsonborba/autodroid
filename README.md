@@ -112,11 +112,20 @@ Job inicial:
 - `linkedin.extract_profile_basic`
 
 Fluxo:
+- vai para `HOME`
+- faz `force-stop` do app alvo
 - abre o LinkedIn
 - tenta abrir a área de perfil
 - coleta textos visíveis pela árvore de UI
 - cai para screenshot + OCR só se necessário
 - persiste o resultado no job
+
+## Política da Sprint 1
+
+- toda execução começa de `HOME`
+- o app alvo é sempre encerrado completamente antes de abrir
+- não existe retomada de progresso no meio da task
+- placeholders de resume/contexto ficam preparados apenas para evolução futura
 
 ## Changelog
 

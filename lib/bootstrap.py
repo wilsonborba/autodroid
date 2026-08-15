@@ -36,7 +36,7 @@ def get_registry() -> AutomationRegistryService:
 def create_dispatcher() -> DispatcherService:
     settings = get_settings()
     return DispatcherService(
-        session_factory=SessionLocal,
+        session_factory=session_scope,
         registry=get_registry(),
         timezone=settings.timezone,
         worker_name=settings.worker_name,

@@ -9,6 +9,7 @@ from lib.core.utils.json_utils import write_json
 from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.ocr_adapter import OcrAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
+from lib.domain.services.navigation_context_service import NavigationContextService
 
 
 class LinkedInAdapter:
@@ -17,15 +18,23 @@ class LinkedInAdapter:
         self.adb = AdbAdapter(settings.android_serial)
         self.ui = UiAutomatorAdapter(settings.android_serial)
         self.ocr = OcrAdapter(settings.ocr_language)
+        self.navigation_context = NavigationContextService(self.adb)
 
     def extract_profile_basic(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._ensure_device_ready()
-        self.ui.app_start(self.settings.linkedin_package_name)
+        resume_context = self.navigation_context.load_resume_context(payload)
+        if self.navigation_context.can_resume(resume_context):
+            self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
+        else:
+            self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
         profile_opened = self.ui.click_first_by_text_or_description(
             "Meu perfil",
             "Perfil",
             "Profile",
             "Me",
+            "My Profile",
+            "My Profile and Communities",
+            "Menu button: Access my profile and other navigation links",
         )
 
         scrolls = int(payload.get("scrolls", 2))
