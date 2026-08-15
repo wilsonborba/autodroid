@@ -179,6 +179,8 @@ class MapperFlowStepResultResponse(BaseModel):
     node_count: int | None = None
     screenshot_path: str | None = None
     ocr_lines: list[str] | None = None
+    iterations_run: int | None = None  # set when the step had a `repeat` limit (issue #22)
+    stop_reason: str | None = None  # "max_iterations" | "max_duration_seconds" | "execution_window" | "no_new_content"
 
 
 class MapperFlowRunResponse(BaseModel):

@@ -5,13 +5,16 @@ from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutio
 
 
 class FakeUi:
-    def __init__(self) -> None:
+    def __init__(self, dump_sequence: list[list[dict]] | None = None) -> None:
         self.clicked_exact: list[tuple[str, ...]] = []
         self.clicked_contains: list[tuple[str, ...]] = []
         self.exact_result = True
         self.contains_result = True
         self.swipes = 0
         self.screenshots: list[str] = []
+        # dumps are consumed one per call; once exhausted, the last one repeats (simulates the
+        # screen "settling" once there's no more new content to scroll into)
+        self.dump_sequence = list(dump_sequence) if dump_sequence else [[{"text": "hello"}]]
 
     def click_first_by_text_or_description(self, *candidates: str) -> bool:
         self.clicked_exact.append(candidates)
@@ -25,7 +28,9 @@ class FakeUi:
         self.swipes += 1
 
     def dump_nodes(self):
-        return [{"text": "hello"}]
+        if len(self.dump_sequence) > 1:
+            return self.dump_sequence.pop(0)
+        return self.dump_sequence[0]
 
     def screenshot(self, path):
         self.screenshots.append(str(path))
@@ -49,17 +54,21 @@ class FakeOcr:
         return ["line one"]
 
 
-def build_service() -> MapperFlowExecutionService:
+def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowExecutionService:
     service = MapperFlowExecutionService.__new__(MapperFlowExecutionService)
     from lib.core.logs import get_logger
+    from lib.core.settings import load_settings
+    from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
     from lib.domain.services.mapper_safety_service import MapperSafetyService
 
     service.logger = get_logger(__name__)
-    service.settings = type("Settings", (), {"output_dir": __import__("pathlib").Path("/tmp/autodroid-flow-tests")})()
-    service.ui = FakeUi()
+    settings = load_settings()
+    service.settings = type("Settings", (), {"output_dir": __import__("pathlib").Path("/tmp/autodroid-flow-tests"), "timezone": settings.timezone})()
+    service.ui = FakeUi(dump_sequence)
     service.adb = FakeAdb()
     service.ocr = FakeOcr()
     service.safety_service = MapperSafetyService()
+    service.fingerprint_service = MapperFingerprintService()
     service._handlers = {
         "click": service._execute_click,
         "click_first_match": service._execute_click_first_match,
@@ -184,4 +193,74 @@ def test_run_flow_executes_all_steps_in_order() -> None:
     assert result["flow_id"] == 1
     assert [step["step_id"] for step in result["steps"]] == [10, 11, 12]
     assert all(step["success"] for step in result["steps"])
+    assert service.ui.swipes == 1
+
+
+def _changing_dumps(count: int) -> list[list[dict]]:
+    return [[{"text": f"item-{i}"}] for i in range(count)]
+
+
+def test_repeated_step_stops_at_max_iterations() -> None:
+    service = build_service(dump_sequence=_changing_dumps(20))
+    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_iterations": 5}})
+
+    result = service.run_step(step)
+
+    assert result["iterations_run"] == 5
+    assert result["stop_reason"] == "max_iterations"
+    assert service.ui.swipes == 5
+
+
+def test_repeated_step_stops_at_max_duration(monkeypatch) -> None:
+    service = build_service(dump_sequence=_changing_dumps(50))
+    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_duration_seconds": 1}})
+
+    clock = {"value": 0.0}
+
+    def fake_monotonic():
+        clock["value"] += 0.5
+        return clock["value"]
+
+    monkeypatch.setattr("lib.domain.services.mapper_flow_execution_service.time.monotonic", fake_monotonic)
+
+    result = service.run_step(step)
+
+    assert result["stop_reason"] == "max_duration_seconds"
+    assert result["iterations_run"] >= 1
+
+
+def test_repeated_step_stops_when_content_stops_changing() -> None:
+    # 3 distinct dumps, then it "settles" and keeps returning the last one forever: it takes one
+    # extra iteration past the last distinct dump to actually notice the fingerprint repeated
+    service = build_service(dump_sequence=_changing_dumps(3))
+    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_iterations": 50}})
+
+    result = service.run_step(step)
+
+    assert result["stop_reason"] == "no_new_content"
+    assert result["iterations_run"] == 4
+    assert service.ui.swipes == 4
+
+
+def test_repeated_step_respects_execution_window_already_closed() -> None:
+    service = build_service(dump_sequence=_changing_dumps(10))
+    step = make_step(
+        action_type="scroll_up",
+        params_json={"repeat": {"max_iterations": 5, "execution_window_start": "00:00:00", "execution_window_end": "00:00:01"}},
+    )
+
+    result = service.run_step(step)
+
+    assert result["stop_reason"] == "execution_window"
+    assert result["iterations_run"] == 0
+    assert service.ui.swipes == 0
+
+
+def test_step_without_repeat_config_runs_exactly_once() -> None:
+    service = build_service()
+    step = make_step(action_type="scroll_up")
+
+    result = service.run_step(step)
+
+    assert "iterations_run" not in result
     assert service.ui.swipes == 1
