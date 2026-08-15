@@ -111,6 +111,8 @@ def test_ui_mapper_service_runs_light_mode_with_basic_capture(monkeypatch) -> No
     from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
     service.mode_service = MapperModeService()
     service.fingerprint_service = MapperFingerprintService()
+    from lib.domain.services.mapper_safety_service import MapperSafetyService
+    service.safety_service = MapperSafetyService()
 
     fake_repo = FakeRepo()
     monkeypatch.setattr('lib.domain.services.ui_mapper_service.session_scope', lambda: FakeSessionScope())
@@ -123,3 +125,31 @@ def test_ui_mapper_service_runs_light_mode_with_basic_capture(monkeypatch) -> No
     assert result['revisited_screens'] >= 0
     assert len(fake_repo.screens) >= 1
     assert service.navigation_context.prepared == ['com.linkedin.android']
+
+
+def test_ui_mapper_service_skips_dangerous_actions(monkeypatch) -> None:
+    service = UiMapperService.__new__(UiMapperService)
+    service.settings = None
+    service.adb = FakeAdb()
+
+    class DangerousUi(FakeUi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dumps = [[{"text": "Delete", "content_desc": "", "resource_id": "delete_account", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True}]]
+
+    service.ui = DangerousUi()
+    service.navigation_context = FakeNav()
+    from lib.domain.services.mapper_mode_service import MapperModeService
+    from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
+    from lib.domain.services.mapper_safety_service import MapperSafetyService
+    service.mode_service = MapperModeService()
+    service.fingerprint_service = MapperFingerprintService()
+    service.safety_service = MapperSafetyService()
+
+    fake_repo = FakeRepo()
+    monkeypatch.setattr('lib.domain.services.ui_mapper_service.session_scope', lambda: FakeSessionScope())
+    monkeypatch.setattr('lib.domain.services.ui_mapper_service.SqlAlchemyMapperRepository', lambda session: fake_repo)
+
+    result = UiMapperService.run(service, MapperRunConfig(package_name='com.linkedin.android', mode=MapperMode.LIGHT, skip_dangerous_actions=True))
+
+    assert result['actions_executed'] == 0

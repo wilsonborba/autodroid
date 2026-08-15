@@ -13,6 +13,7 @@ from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, Mappe
 from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
+from lib.domain.services.mapper_safety_service import MapperSafetyService
 from lib.domain.services.navigation_context_service import NavigationContextService
 
 
@@ -32,6 +33,7 @@ class UiMapperService(MapperEngine):
         self.navigation_context = NavigationContextService(self.adb)
         self.mode_service = MapperModeService()
         self.fingerprint_service = MapperFingerprintService()
+        self.safety_service = MapperSafetyService()
 
     def run(self, config: MapperRunConfig) -> dict[str, Any]:
         limits = self.mode_service.get_limits(config.mode)
@@ -52,7 +54,7 @@ class UiMapperService(MapperEngine):
             mapper_session.started_at = utc_now()
 
             state = {"actions_executed": 0, "screens_recorded": 0, "scrolls_used": 0, "revisited_screens": 0}
-            self._explore(repository, mapper_session.id, depth=0, state=state, max_depth=limits.max_depth, max_actions=limits.max_actions, max_scrolls=limits.max_scrolls)
+            self._explore(repository, mapper_session.id, depth=0, state=state, max_depth=limits.max_depth, max_actions=limits.max_actions, max_scrolls=limits.max_scrolls, config_skip_dangerous_actions=config.skip_dangerous_actions)
 
             mapper_session.status = MapperSessionStatus.COMPLETED
             mapper_session.finished_at = utc_now()
@@ -67,7 +69,7 @@ class UiMapperService(MapperEngine):
                 "status": mapper_session.status.value,
             }
 
-    def _explore(self, repository: SqlAlchemyMapperRepository, session_id: int, *, depth: int, state: dict[str, int], max_depth: int, max_actions: int, max_scrolls: int) -> int | None:
+    def _explore(self, repository: SqlAlchemyMapperRepository, session_id: int, *, depth: int, state: dict[str, int], max_depth: int, max_actions: int, max_scrolls: int, config_skip_dangerous_actions: bool) -> int | None:
         nodes = self.ui.dump_nodes()
         fingerprint = self.fingerprint_service.fingerprint(nodes)
         existing_screen = repository.find_screen_by_fingerprint(session_id, fingerprint)
@@ -116,6 +118,7 @@ class UiMapperService(MapperEngine):
             if state["actions_executed"] >= max_actions:
                 break
             node_id = persisted_nodes[index].id if index < len(persisted_nodes) else None
+            safety = self.safety_service.classify(candidate.node, candidate.label)
             action = repository.create_action(
                 session_id=session_id,
                 screen_id=screen.id,
@@ -123,9 +126,19 @@ class UiMapperService(MapperEngine):
                 action_key=candidate.action_key,
                 action_type="click",
                 label=candidate.label,
-                safety=MapperActionSafety.SAFE,
+                safety=safety,
                 executed=False,
             )
+            if safety == MapperActionSafety.DANGEROUS and config_skip_dangerous_actions:
+                action.skipped_reason = "dangerous_action_blocked"
+                repository.create_transition(
+                    session_id=session_id,
+                    from_screen_id=screen.id,
+                    action_id=action.id,
+                    to_screen_id=None,
+                    result_type="skipped_dangerous",
+                )
+                continue
             if not candidate.bounds:
                 action.skipped_reason = "missing_bounds"
                 continue
@@ -134,7 +147,7 @@ class UiMapperService(MapperEngine):
             action.success = success
             state["actions_executed"] += 1
             if success:
-                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0)
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
@@ -155,7 +168,7 @@ class UiMapperService(MapperEngine):
         if max_scrolls > 0 and state["scrolls_used"] < max_scrolls:
             self.ui.swipe_up()
             state["scrolls_used"] += 1
-            self._explore(repository, session_id, depth=depth, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0)
+            self._explore(repository, session_id, depth=depth, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
 
         return screen.id
 
