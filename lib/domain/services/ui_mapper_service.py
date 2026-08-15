@@ -10,6 +10,7 @@ from lib.dal.local.database import session_scope
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
+from lib.domain.models.mapper_model import MapperSession
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
 from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
@@ -39,6 +40,15 @@ class UiMapperService(MapperEngine):
 
     def run(self, config: MapperRunConfig) -> dict[str, Any]:
         limits = self.mode_service.get_limits(config.mode)
+
+        if not config.override:
+            with session_scope() as session:
+                repository = SqlAlchemyMapperRepository(session)
+                existing = repository.get_latest_session(config.package_name, status=MapperSessionStatus.COMPLETED)
+                if existing is not None:
+                    self.logger.info("Reusing mapper session %s for %s (override=False)", existing.id, config.package_name)
+                    return self._reused_session_result(existing)
+
         self.logger.info("Starting mapper for %s in %s mode", config.package_name, config.mode.value)
         self.navigation_context.prepare_fresh_app_launch(config.package_name)
 
@@ -71,7 +81,22 @@ class UiMapperService(MapperEngine):
                 "scrolls_used": state["scrolls_used"],
                 "revisited_screens": state["revisited_screens"],
                 "status": mapper_session.status.value,
+                "reused": False,
             }
+
+    @staticmethod
+    def _reused_session_result(mapper_session: MapperSession) -> dict[str, Any]:
+        return {
+            "session_id": mapper_session.id,
+            "package_name": mapper_session.package_name,
+            "mode": mapper_session.mode.value,
+            "screens_recorded": len(mapper_session.screens),
+            "actions_executed": sum(1 for action in mapper_session.actions if action.executed),
+            "scrolls_used": 0,
+            "revisited_screens": sum(1 for screen in mapper_session.screens if screen.visit_count > 1),
+            "status": mapper_session.status.value,
+            "reused": True,
+        }
 
     def _explore(self, repository: SqlAlchemyMapperRepository, session_id: int, *, depth: int, state: dict[str, int], max_depth: int, max_actions: int, max_scrolls: int, config_skip_dangerous_actions: bool) -> int | None:
         nodes = self.ui.dump_nodes()

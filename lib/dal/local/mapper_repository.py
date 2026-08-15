@@ -86,6 +86,17 @@ class SqlAlchemyMapperRepository:
         stmt = select(MapperSession).order_by(MapperSession.created_at.desc()).limit(limit)
         return list(self.session.scalars(stmt))
 
+    def get_latest_session(self, package_name: str, status: MapperSessionStatus | None = None) -> MapperSession | None:
+        stmt = (
+            select(MapperSession)
+            .options(selectinload(MapperSession.screens), selectinload(MapperSession.actions), selectinload(MapperSession.transitions))
+            .where(MapperSession.package_name == package_name)
+        )
+        if status is not None:
+            stmt = stmt.where(MapperSession.status == status)
+        stmt = stmt.order_by(MapperSession.created_at.desc()).limit(1)
+        return self.session.scalar(stmt)
+
     def find_screen_by_fingerprint(self, session_id: int, fingerprint: str) -> MapperScreen | None:
         stmt = select(MapperScreen).where(MapperScreen.session_id == session_id, MapperScreen.fingerprint == fingerprint)
         return self.session.scalar(stmt)

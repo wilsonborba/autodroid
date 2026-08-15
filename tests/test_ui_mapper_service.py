@@ -93,6 +93,24 @@ class FakeRepo:
         self.transitions.append(kwargs)
         return kwargs
 
+    def get_latest_session(self, package_name: str, status=None):
+        return None
+
+
+class FakeExistingSession:
+    def __init__(self) -> None:
+        self.id = 7
+        self.package_name = 'com.linkedin.android'
+        self.mode = MapperMode.LIGHT
+        self.status = type('Status', (), {'value': 'completed'})()
+        self.screens = [type('Screen', (), {'visit_count': 1})(), type('Screen', (), {'visit_count': 2})()]
+        self.actions = [type('Action', (), {'executed': True})(), type('Action', (), {'executed': False})()]
+
+
+class FakeRepoWithExistingSession(FakeRepo):
+    def get_latest_session(self, package_name: str, status=None):
+        return FakeExistingSession()
+
 
 class FakeSessionScope:
     def __enter__(self):
@@ -156,3 +174,57 @@ def test_ui_mapper_service_skips_dangerous_actions(monkeypatch) -> None:
     result = UiMapperService.run(service, MapperRunConfig(package_name='com.linkedin.android', mode=MapperMode.LIGHT, skip_dangerous_actions=True))
 
     assert result['actions_executed'] == 0
+
+
+def test_ui_mapper_service_reuses_existing_session_by_default(monkeypatch) -> None:
+    service = UiMapperService.__new__(UiMapperService)
+    service.logger = get_logger(__name__)
+    service.settings = None
+    service.adb = FakeAdb()
+    service.ui = FakeUi()
+    service.navigation_context = FakeNav()
+    from lib.domain.services.mapper_mode_service import MapperModeService
+    from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
+    from lib.domain.services.mapper_safety_service import MapperSafetyService
+    service.mode_service = MapperModeService()
+    service.fingerprint_service = MapperFingerprintService()
+    service.safety_service = MapperSafetyService()
+
+    fake_repo = FakeRepoWithExistingSession()
+    monkeypatch.setattr('lib.domain.services.ui_mapper_service.session_scope', lambda: FakeSessionScope())
+    monkeypatch.setattr('lib.domain.services.ui_mapper_service.SqlAlchemyMapperRepository', lambda session: fake_repo)
+
+    result = UiMapperService.run(service, MapperRunConfig(package_name='com.linkedin.android', mode=MapperMode.LIGHT))
+
+    assert result['reused'] is True
+    assert result['session_id'] == 7
+    assert result['screens_recorded'] == 2
+    assert result['actions_executed'] == 1
+    assert result['revisited_screens'] == 1
+    assert service.navigation_context.prepared == []
+    assert fake_repo.sessions == []
+
+
+def test_ui_mapper_service_override_forces_remap(monkeypatch) -> None:
+    service = UiMapperService.__new__(UiMapperService)
+    service.logger = get_logger(__name__)
+    service.settings = None
+    service.adb = FakeAdb()
+    service.ui = FakeUi()
+    service.navigation_context = FakeNav()
+    from lib.domain.services.mapper_mode_service import MapperModeService
+    from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
+    from lib.domain.services.mapper_safety_service import MapperSafetyService
+    service.mode_service = MapperModeService()
+    service.fingerprint_service = MapperFingerprintService()
+    service.safety_service = MapperSafetyService()
+
+    fake_repo = FakeRepoWithExistingSession()
+    monkeypatch.setattr('lib.domain.services.ui_mapper_service.session_scope', lambda: FakeSessionScope())
+    monkeypatch.setattr('lib.domain.services.ui_mapper_service.SqlAlchemyMapperRepository', lambda session: fake_repo)
+
+    result = UiMapperService.run(service, MapperRunConfig(package_name='com.linkedin.android', mode=MapperMode.LIGHT, override=True))
+
+    assert result['reused'] is False
+    assert service.navigation_context.prepared == ['com.linkedin.android']
+    assert len(fake_repo.sessions) == 1
