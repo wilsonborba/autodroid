@@ -87,10 +87,19 @@ def _resolve_level(*, debug: bool, verbose: bool, target: LogTarget) -> int:
     return logging.WARNING
 
 
+_MANAGED_HANDLER_ATTR = "_autodroid_managed_handler"
+
+
 def configure_logging(*, debug: bool, verbose: bool = False, target: LogTarget = LogTarget.CLI, log_file: Path | None = None) -> None:
     level = _resolve_level(debug=debug, verbose=verbose, target=target)
     root_logger = logging.getLogger()
-    root_logger.handlers.clear()
+    # only ever remove handlers this function itself added on an earlier call (e.g. the CLI's
+    # own callback re-runs it once per invocation): something else attached to the root logger
+    # for its own reasons (a test harness's own capture handler, most notably) is left alone,
+    # a blanket .clear() used to silently break any test relying on that
+    for handler in list(root_logger.handlers):
+        if getattr(handler, _MANAGED_HANDLER_ATTR, False):
+            root_logger.removeHandler(handler)
     # the root logger's own level has to stay at the lowest anything might want: the file
     # handler below always captures full debug detail for /logs/stream to tail (issue #39),
     # regardless of --verbose or of the CLI/API target, a record filtered out here never even
@@ -104,6 +113,7 @@ def configure_logging(*, debug: bool, verbose: bool = False, target: LogTarget =
     stream_handler.setFormatter(StructuredFormatter(use_color=_should_use_color(target)))
     if target == LogTarget.CLI:
         stream_handler.addFilter(CliFilter(verbose=verbose))
+    setattr(stream_handler, _MANAGED_HANDLER_ATTR, True)
     root_logger.addHandler(stream_handler)
 
     if log_file is not None:
@@ -114,6 +124,7 @@ def configure_logging(*, debug: bool, verbose: bool = False, target: LogTarget =
         file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=LOG_FILE_MAX_BYTES, backupCount=LOG_FILE_BACKUP_COUNT)
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(StructuredFormatter(use_color=False))
+        setattr(file_handler, _MANAGED_HANDLER_ATTR, True)
         root_logger.addHandler(file_handler)
 
     for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "httpx"]:

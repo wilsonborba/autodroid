@@ -177,11 +177,14 @@ class MapperFlowExecutionService:
 
     def _ensure_screen(self, package_name: str, source_session_id: int, target_screen_id: int, current_screen_id: int | None) -> None:
         if target_screen_id == current_screen_id:
+            self.logger.debug("Already on screen %s, no navigation needed", target_screen_id)
             return
         flow = MapperFlow(package_name=package_name, source_session_id=source_session_id)
         if current_screen_id is not None:
+            self.logger.debug("Bridging gap %s -> %s before running the requested action", current_screen_id, target_screen_id)
             self._bridge_gap(flow, current_screen_id, target_screen_id)
         else:
+            self.logger.debug("Current screen unknown, relaunching %s to reach screen %s from the root", package_name, target_screen_id)
             self._relaunch_to_screen(flow, target_screen_id)
 
     def _relaunch_to_screen(self, flow: MapperFlow, target_screen_id: int) -> None:
@@ -190,6 +193,7 @@ class MapperFlowExecutionService:
         # departure recovery in the mapper itself (issue #28), here for the on-demand executor
         with session_scope() as session:
             _root_screen_id, ancestor_steps = MapperFlowService(session).resolve_restart_plan(flow.package_name, target_screen_id)
+        self.logger.debug("Replaying %s ancestor step(s) after relaunch to reach screen %s", len(ancestor_steps), target_screen_id)
         self.navigation_context.prepare_fresh_app_launch(flow.package_name)
         for step in ancestor_steps:
             self.run_step(step)
@@ -226,6 +230,7 @@ class MapperFlowExecutionService:
                 node = mapper_repository.get_node(action.node_id) if action and action.node_id else None
                 route_edges.append((transition.id, node.bounds if node else None))
 
+        self.logger.debug("Route planner chose %s (%s) for %s -> %s", plan.strategy_type, plan.reason, current_screen_id, target_screen_id)
         started_at = time.monotonic()
         success = True
         transition_observations: list[tuple[int, float, bool]] = []
@@ -241,6 +246,7 @@ class MapperFlowExecutionService:
             for transition_id, bounds in route_edges:
                 edge_started_at = time.monotonic()
                 edge_success = bounds is not None and self.ui.click_bounds(bounds)
+                self.logger.debug("Route edge (transition %s, bounds=%s) -> success=%s", transition_id, bounds, edge_success)
                 transition_observations.append((transition_id, (time.monotonic() - edge_started_at) * 1000, edge_success))
                 if not edge_success:
                     success = False
