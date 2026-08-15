@@ -129,9 +129,9 @@ class FakeOcr:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def extract_lines(self, path):
+    def extract_text_regions(self, path):
         self.calls.append(str(path))
-        return ["line one"]
+        return [{"text": "line one", "bounds": "[0,0][50,20]"}]
 
 
 def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowExecutionService:
@@ -153,6 +153,7 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
     service._handlers = {
         "click": service._execute_click,
         "click_first_match": service._execute_click_first_match,
+        "click_bounds": service._execute_click_bounds,
         "scroll_up": service._execute_scroll_up,
         "back": service._execute_back,
         "wait": service._execute_wait,
@@ -182,6 +183,36 @@ def test_click_step_executes_and_reports_success() -> None:
 
     assert result["success"] is True
     assert service.ui.clicked_exact == [("Profile", "Perfil")]
+
+
+def test_click_bounds_step_clicks_the_exact_region() -> None:
+    service = build_service()
+    step = make_step(action_type="click_bounds", selector_json={"bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.clicked_bounds == ["[0,0][50,20]"]
+
+
+def test_click_bounds_step_fails_without_bounds() -> None:
+    service = build_service()
+    step = make_step(action_type="click_bounds", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.clicked_bounds == []
+
+
+def test_ocr_extract_step_returns_text_regions() -> None:
+    service = build_service()
+    step = make_step(action_type="ocr_extract", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert result["ocr_regions"] == [{"text": "line one", "bounds": "[0,0][50,20]"}]
 
 
 def test_click_step_blocked_when_label_is_dangerous() -> None:
@@ -510,3 +541,68 @@ def test_run_flow_falls_back_to_restart_when_gap_has_no_direct_path() -> None:
     # "GoA" is the auto-resolved ancestor replayed to reach step 2's screen, then step 2 itself
     assert ("GoA",) in service.ui.clicked_exact
     assert ("GoB",) in service.ui.clicked_exact
+
+
+def test_execute_on_demand_runs_directly_when_already_at_the_target_screen() -> None:
+    package_name = "com.ondemand1.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=False)
+        session.commit()
+        screen_a_id, action_a_to_b_id = screen_a.id, action_a_to_b.id
+
+    service = build_service()
+    result = service.execute_on_demand(package_name=package_name, target_action_id=action_a_to_b_id, current_screen_id=screen_a_id)
+
+    assert result["success"] is True
+    assert service.navigation_context.prepared == []  # already there, no relaunch
+    assert service.ui.clicked_bounds == []  # no bridging happened
+    assert service.ui.clicked_exact == [("GoB",)]
+
+
+def test_execute_on_demand_bridges_a_gap_using_the_route_planner() -> None:
+    package_name = "com.ondemand2.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=True)
+        session.commit()
+        screen_c_id, action_a_to_b_id = screen_c.id, action_a_to_b.id
+
+    service = build_service()
+    result = service.execute_on_demand(package_name=package_name, target_action_id=action_a_to_b_id, current_screen_id=screen_c_id)
+
+    assert result["success"] is True
+    assert service.ui.clicked_bounds == ["[0,60][10,70]"]  # the bridging edge, walked once
+    assert service.navigation_context.prepared == []
+    assert service.ui.clicked_exact == [("GoB",)]
+
+
+def test_execute_on_demand_relaunches_and_replays_ancestors_when_position_unknown() -> None:
+    package_name = "com.ondemand3.testapp"
+    with SessionLocal() as session:
+        mapper_session, root, screen_a, screen_c, action_root_to_c, action_a_to_b = _seed_gap_graph(session, package_name=package_name, with_direct_edge=False)
+        session.commit()
+        action_a_to_b_id = action_a_to_b.id
+
+    service = build_service()
+    result = service.execute_on_demand(package_name=package_name, target_action_id=action_a_to_b_id, current_screen_id=None)
+
+    assert result["success"] is True
+    assert service.navigation_context.prepared == [package_name]
+    assert ("GoA",) in service.ui.clicked_exact  # ancestor chain replayed to reach screen_a
+    assert ("GoB",) in service.ui.clicked_exact  # then the actual target action
+
+
+def test_execute_on_demand_raw_action_never_navigates() -> None:
+    service = build_service()
+
+    result = service.execute_on_demand(package_name="com.ondemand4.testapp", action_type="dump_nodes")
+
+    assert result["success"] is True
+    assert result["resulting_screen_id"] is None
+    assert service.navigation_context.prepared == []
+
+
+def test_execute_on_demand_requires_either_target_action_id_or_action_type() -> None:
+    service = build_service()
+
+    with pytest.raises(ValueError):
+        service.execute_on_demand(package_name="com.ondemand5.testapp")

@@ -50,6 +50,7 @@ class MapperFlowExecutionService:
         self._handlers = {
             "click": self._execute_click,
             "click_first_match": self._execute_click_first_match,
+            "click_bounds": self._execute_click_bounds,
             "scroll_up": self._execute_scroll_up,
             "back": self._execute_back,
             "wait": self._execute_wait,
@@ -107,6 +108,63 @@ class MapperFlowExecutionService:
         with session_scope() as session:
             transition = SqlAlchemyMapperRepository(session).find_transition_by_action(step.source_action_id)
             return transition.to_screen_id if transition is not None else None
+
+    def execute_on_demand(
+        self,
+        *,
+        package_name: str,
+        target_action_id: int | None = None,
+        current_screen_id: int | None = None,
+        action_type: str | None = None,
+        selector: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Runs one action right now, with no Flow saved beforehand (issue #32).
+
+        A mapped action (`target_action_id`) always gets to the right screen first: a direct
+        route when `current_screen_id` is known and one exists (#24), a relaunch and replay of
+        the known ancestor chain otherwise, exactly the same gap-bridging `run_flow` already does
+        between steps (#26), just for a single on-demand action instead of a whole Flow.
+
+        A raw action (`action_type` instead) runs against whatever's on screen right now, no
+        navigation attempted: for exploratory or OCR-driven interaction, where there's no mapped
+        destination to aim for in the first place (a `dump_nodes`/`screenshot`/`ocr_extract` read,
+        or a `click_bounds` on something just found that way)."""
+        if target_action_id is None:
+            if not action_type:
+                raise ValueError("Provide either target_action_id or action_type")
+            step = MapperFlowStep(package_name=package_name, action_type=action_type, selector_json=selector or {}, params_json=params)
+            result = self.run_step(step)
+            return {**result, "resulting_screen_id": None}
+
+        with session_scope() as session:
+            action = SqlAlchemyMapperRepository(session).get_action(target_action_id)
+            if action is None:
+                raise ValueError(f"Mapper action {target_action_id} not found")
+            source_session_id = action.session_id
+            step = MapperFlowService(session).get_or_create_step_for_action(package_name, target_action_id)
+            step_source_screen_id = step.source_screen_id
+
+        if step_source_screen_id is not None and step_source_screen_id != current_screen_id:
+            flow = MapperFlow(package_name=package_name, source_session_id=source_session_id)
+            if current_screen_id is not None:
+                self._bridge_gap(flow, current_screen_id, step_source_screen_id)
+            else:
+                self._relaunch_to_screen(flow, step_source_screen_id)
+
+        result = self.run_step(step)
+        resulting_screen_id = self._resolve_screen_after_step(step, result)
+        return {**result, "resulting_screen_id": resulting_screen_id}
+
+    def _relaunch_to_screen(self, flow: MapperFlow, target_screen_id: int) -> None:
+        # no current_screen_id to route from at all, a relaunch always lands at the root, so this
+        # is always exactly the ancestor chain (#23), walked forward once, same idea as the
+        # departure recovery in the mapper itself (issue #28), here for the on-demand executor
+        with session_scope() as session:
+            _root_screen_id, ancestor_steps = MapperFlowService(session).resolve_restart_plan(flow.package_name, target_screen_id)
+        self.navigation_context.prepare_fresh_app_launch(flow.package_name)
+        for step in ancestor_steps:
+            self.run_step(step)
 
     def navigate(
         self,
@@ -309,6 +367,15 @@ class MapperFlowExecutionService:
                     return {"success": True}
         return {"success": False}
 
+    def _execute_click_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # clicks an exact "[x1,y1][x2,y2]" region instead of matching by text/description: needed
+        # to act on something already located another way (a prior dump_nodes, or an OCR region
+        # from _execute_ocr_extract), not everything worth clicking has readable text (#32)
+        bounds = (step.selector_json or {}).get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.click_bounds(bounds)}
+
     def _execute_scroll_up(self, step: MapperFlowStep) -> dict[str, Any]:
         self.ui.swipe_up()
         return {"success": True}
@@ -334,5 +401,8 @@ class MapperFlowExecutionService:
     def _execute_ocr_extract(self, step: MapperFlowStep) -> dict[str, Any]:
         filename = (step.params_json or {}).get("filename") or f"flow_step_{step.id}.png"
         path = self.settings.output_dir / "screenshots" / filename
-        lines = self.ocr.extract_lines(path)
-        return {"success": True, "ocr_lines": lines}
+        regions = self.ocr.extract_text_regions(path)
+        # OCR is only a textual reference (issue #32): it always "succeeds" if it ran, even with
+        # no regions found or nothing actionable in them, deciding what to do with the result
+        # (or that it wasn't useful this time) is the caller's job, not something to fail here
+        return {"success": True, "ocr_regions": regions}
