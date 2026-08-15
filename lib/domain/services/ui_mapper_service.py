@@ -210,9 +210,11 @@ class UiMapperService(MapperEngine):
         repeat_signature_threshold: int,
         config_skip_dangerous_actions: bool,
         package_name: str,
+        ancestor_bounds: list[str] | None = None,
         previous_scroll_signature: str | None = None,
         consecutive_repeat_count: int = 0,
     ) -> int | None:
+        ancestor_bounds = ancestor_bounds if ancestor_bounds is not None else []
         nodes = self.ui.dump_nodes()
 
         # a click can legitimately leave the target app (share sheet, external link, sign-in
@@ -296,8 +298,8 @@ class UiMapperService(MapperEngine):
                 if node is None or not node.bounds:
                     continue
                 if self.ui.click_bounds(node.bounds):
-                    self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
-                    self._navigate_back(package_name)
+                    replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [node.bounds])
+                    self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
             return screen.id
 
         candidates = self._extract_candidates(nodes, package_name)
@@ -313,8 +315,8 @@ class UiMapperService(MapperEngine):
                 if existing_action.executed and existing_action.success and existing_action.node_id:
                     existing_node = repository.get_node(existing_action.node_id)
                     if existing_node and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
-                        self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
-                        self._navigate_back(package_name)
+                        replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
+                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
                 continue
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
@@ -349,7 +351,7 @@ class UiMapperService(MapperEngine):
             action.success = success
             state["actions_executed"] += 1
             if success:
-                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds])
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
@@ -357,7 +359,7 @@ class UiMapperService(MapperEngine):
                     to_screen_id=to_screen_id,
                     result_type="clicked" if to_screen_id is not None else "left_app",
                 )
-                self._navigate_back(package_name)
+                self._return_to_screen(package_name, ancestor_bounds, departed=to_screen_id is None)
             else:
                 repository.create_transition(
                     session_id=session_id,
@@ -381,7 +383,8 @@ class UiMapperService(MapperEngine):
                 repository, session_id, depth=depth, state=state, visited_this_pass=visited_this_pass,
                 max_depth=max_depth, max_actions=max_actions, max_scrolls=max_scrolls,
                 repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions,
-                package_name=package_name, previous_scroll_signature=structural_signature, consecutive_repeat_count=consecutive_repeat_count,
+                package_name=package_name, ancestor_bounds=ancestor_bounds,
+                previous_scroll_signature=structural_signature, consecutive_repeat_count=consecutive_repeat_count,
             )
 
         return screen.id
@@ -415,6 +418,28 @@ class UiMapperService(MapperEngine):
             self.ui.click_bounds(back_node["bounds"])
         else:
             self.adb.press_back()
+
+    def _return_to_screen(self, package_name: str, ancestor_bounds: list[str], *, departed: bool) -> None:
+        """Undoes the click that was just made, one way or another, so the caller's own screen
+        is current again and its remaining candidates can keep being tried.
+
+        A normal in-app click just needs `_navigate_back` (issue #27). A click that left the
+        target app is a different, harder problem: from an unknown foreign screen there's no
+        reliable "undo", pressing back again can just as easily open a third app or exit further
+        (the exact failure a user reported: once it left the app once, it never found its way
+        back, and each of its own saved actions afterward kept opening a different app off the
+        home screen). The only reliable recovery is to relaunch the target app fresh (guaranteed
+        known state: its root) and replay the exact clicks that got here (issue #28), passed down
+        the recursion as `ancestor_bounds` rather than looked up in the database: the transition
+        connecting into the current screen isn't committed yet while we're still inside exploring
+        it, so a lookup at this point wouldn't find it."""
+        if not departed:
+            self._navigate_back(package_name)
+            return
+        self.logger.warning("Relaunching %s and replaying %s step(s) back to the current screen after leaving the app", package_name, len(ancestor_bounds))
+        self.navigation_context.prepare_fresh_app_launch(package_name)
+        for bounds in ancestor_bounds:
+            self.ui.click_bounds(bounds)
 
     def _extract_candidates(self, nodes: list[dict[str, Any]], package_name: str) -> list[MapperActionCandidate]:
         candidates: list[MapperActionCandidate] = []
