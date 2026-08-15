@@ -140,6 +140,15 @@ class MapperFlowService:
             params_json=step.get("params"),
         )
 
+    def resolve_restart_plan(self, package_name: str, source_screen_id: int) -> tuple[int, list[MapperFlowStep]]:
+        """Public wrapper around `_resolve_ancestor_steps` (issue #26): what a restart-from-root
+        would need to replay to reach `source_screen_id`, root screen id first, steps root-first.
+        Used by `MapperFlowExecutionService.run_flow` to bridge a gap between two steps, the same
+        ancestor-walk already used when composing a Flow manually (#23)."""
+        ancestor_steps = self._resolve_ancestor_steps(package_name, source_screen_id)
+        root_screen_id = ancestor_steps[0].source_screen_id if ancestor_steps else source_screen_id
+        return root_screen_id, ancestor_steps
+
     def _resolve_ancestor_steps(self, package_name: str, source_screen_id: int) -> list[MapperFlowStep]:
         """Walks MapperTransition backwards from `source_screen_id` up to the session root,
         ensuring a reusable step exists for each ancestor action (reused by source_action_id
