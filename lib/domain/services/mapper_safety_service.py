@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from lib.domain.models.mapper_types import MapperActionSafety
@@ -38,19 +39,30 @@ class MapperSafetyService:
 
     def classify(self, node: dict[str, Any], label: str | None) -> MapperActionSafety:
         merged = self._haystack(node, label)
-        if any(pattern in merged for pattern in self.DANGEROUS_PATTERNS):
+        if self._matches_any(merged, self.DANGEROUS_PATTERNS):
             return MapperActionSafety.DANGEROUS
         return MapperActionSafety.SAFE
 
     def is_peek_candidate(self, node: dict[str, Any], label: str | None) -> bool:
         merged = self._haystack(node, label)
-        return any(pattern in merged for pattern in self.PEEK_PATTERNS)
+        return self._matches_any(merged, self.PEEK_PATTERNS)
+
+    @staticmethod
+    def _matches_any(haystack: str, patterns: tuple[str, ...]) -> bool:
+        # whole-word matching, not a raw substring check (issue #36): "post" as a plain substring
+        # also matched inside "posts", wrongly flagging LinkedIn's own top search bar ("Search for
+        # people, jobs, posts, and more") as dangerous and blocking it every session
+        return any(re.search(rf"\b{re.escape(pattern)}\b", haystack) for pattern in patterns)
 
     @staticmethod
     def _haystack(node: dict[str, Any], label: str | None) -> str:
-        return " ".join([
+        merged = " ".join([
             str(label or "").lower(),
             str(node.get("text") or "").lower(),
             str(node.get("content_desc") or "").lower(),
             str(node.get("resource_id") or "").lower(),
         ])
+        # a resource_id is snake_case/dotted, not space-separated ("post_comment_button"); without
+        # this, the underscore/dot/colon/slash joints count as part of the word for \b purposes and
+        # a whole-word match would never fire inside one
+        return re.sub(r"[_:/.\-]+", " ", merged)
