@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 
 
 class AdbAdapter:
@@ -17,3 +18,20 @@ class AdbAdapter:
 
     def shell(self, command: str) -> str:
         return self.run("shell", command)
+
+    def keyevent(self, keycode: str) -> str:
+        return self.shell(f"input keyevent {keycode}")
+
+    def go_home(self) -> None:
+        self.keyevent("KEYCODE_HOME")
+        time.sleep(1)
+
+    def press_back(self) -> None:
+        self.keyevent("KEYCODE_BACK")
+        time.sleep(0.5)
+
+    def force_stop_app(self, package_name: str) -> str:
+        return self.shell(f"am force-stop {package_name}")
+
+    def start_app(self, package_name: str) -> str:
+        return self.shell(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1")

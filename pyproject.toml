@@ -27,8 +27,8 @@ dev = [
 ]
 
 [project.scripts]
-autodroid = "main:cli_entrypoint"
-autodroid-api = "main:api_entrypoint"
+autodroid = "lib.entrypoints:cli_entrypoint"
+autodroid-api = "lib.entrypoints:api_entrypoint"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
