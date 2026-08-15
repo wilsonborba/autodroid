@@ -236,8 +236,10 @@ class UiMapperService(MapperEngine):
             visited_this_pass.add(screen.id)
             persisted_nodes = repository.get_screen(screen.id).nodes
             node_id_by_key = {node.node_key: node.id for node in persisted_nodes}
+            self.logger.debug("Revisiting known screen %s at depth %s (visit_count=%s, expanded=%s)", screen.id, depth, screen.visit_count, existing_screen.expanded)
 
             if peek_only or depth >= max_depth:
+                self.logger.debug("Not expanding screen %s: %s", screen.id, "peek_only" if peek_only else f"depth {depth} reached max_depth {max_depth}")
                 return screen.id
 
             if existing_screen.expanded:
@@ -257,6 +259,7 @@ class UiMapperService(MapperEngine):
             # the brand-new-screen path below, redoing the scroll pass on every resume would be
             # wasteful and isn't needed, the nodes already on file are still valid)
             candidates = self._extract_candidates(nodes, package_name)
+            self.logger.debug("Resuming mid-screen %s: %s candidate(s) extracted from what was already captured", screen.id, len(candidates))
             self._process_candidates(
                 repository, session_id, screen, candidates, node_id_by_key,
                 depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth,
@@ -295,6 +298,7 @@ class UiMapperService(MapperEngine):
         # else in one giant uncommitted transaction
         repository.session.commit()
         visited_this_pass.add(screen.id)
+        self.logger.debug("Created screen %s at depth %s (fingerprint=%s, %s node(s) persisted)", screen.id, depth, fingerprint[:12], len(nodes))
 
         if peek_only:
             # catalogued (screen + nodes already persisted above), never explored further:
@@ -327,6 +331,7 @@ class UiMapperService(MapperEngine):
         while True:
             if depth < max_depth:
                 candidates = self._extract_candidates(accumulated_nodes, package_name)
+                self.logger.debug("Screen %s: %s candidate(s) extracted (%s accumulated node(s) so far)", screen.id, len(candidates), len(accumulated_nodes))
                 self._process_candidates(
                     repository, session_id, screen, candidates, node_id_by_key,
                     depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth,
@@ -342,6 +347,12 @@ class UiMapperService(MapperEngine):
                 and consecutive_empty_scrolls < max_consecutive_empty_scrolls
             )
             if not can_scroll:
+                self.logger.debug(
+                    "Stopping scroll on screen %s after %s scroll(s): %s", screen.id, screen_scrolls_used,
+                    "no scrollable content" if not any(node.get("scrollable") for node in current_nodes)
+                    else "max_scrolls reached" if screen_scrolls_used >= max_scrolls
+                    else f"{consecutive_empty_scrolls} consecutive scroll(s) found nothing new",
+                )
                 break
 
             self.ui.swipe_up()
@@ -354,12 +365,14 @@ class UiMapperService(MapperEngine):
                 break
 
             new_nodes_found = False
+            new_node_count = 0
             for index, node in enumerate(current_nodes):
                 key = self._node_key(node, index)
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
                 new_nodes_found = True
+                new_node_count += 1
                 accumulated_nodes.append(node)
                 persisted = repository.create_node(
                     screen_id=screen.id, node_key=key, text=node.get("text"), content_desc=node.get("content_desc"),
@@ -372,9 +385,11 @@ class UiMapperService(MapperEngine):
                 node_id_by_key[key] = persisted.id
             if new_nodes_found:
                 repository.session.commit()
+                self.logger.debug("Scroll %s on screen %s found %s new node(s), continuing", screen_scrolls_used, screen.id, new_node_count)
                 consecutive_empty_scrolls = 0
             else:
                 consecutive_empty_scrolls += 1
+                self.logger.debug("Scroll %s on screen %s found nothing new (%s/%s consecutive)", screen_scrolls_used, screen.id, consecutive_empty_scrolls, max_consecutive_empty_scrolls)
 
         if depth < max_depth:
             repository.mark_screen_expanded(screen.id)
@@ -416,14 +431,19 @@ class UiMapperService(MapperEngine):
 
             existing_action = repository.find_action_by_key(session_id, screen.id, candidate.action_key)
             if existing_action is not None:
-                if replay_known:
-                    existing_node = self._replay_target(repository, existing_action)
-                    if existing_node is not None and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
+                if not replay_known:
+                    self.logger.debug("Skipping %r on screen %s: already tried earlier this same scroll pass", candidate.label, screen.id)
+                    continue
+                existing_node = self._replay_target(repository, existing_action)
+                if existing_node is not None and existing_node.bounds:
+                    self.logger.debug("Replaying known action %r on screen %s", candidate.label, screen.id)
+                    if self.ui.click_bounds(existing_node.bounds):
                         replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
                         self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
                 continue
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
+            self.logger.debug("Candidate found: %r (bounds=%s, safety=%s)", candidate.label, candidate.bounds, safety.value)
             action = repository.create_action(
                 session_id=session_id,
                 screen_id=screen.id,
@@ -447,6 +467,7 @@ class UiMapperService(MapperEngine):
                 repository.session.commit()
                 continue
             if not candidate.bounds:
+                self.logger.debug("Skipping candidate %r on screen %s: no bounds to click", candidate.label, screen.id)
                 action.skipped_reason = "missing_bounds"
                 repository.session.commit()
                 continue
@@ -454,11 +475,14 @@ class UiMapperService(MapperEngine):
             action.executed = True
             action.success = success
             state["actions_executed"] += 1
+            self.logger.debug("Clicked %r (bounds=%s) -> success=%s", candidate.label, candidate.bounds, success)
             if success:
                 # reveals a sub-interface without necessarily doing anything itself ("Message"
                 # opens a compose screen, it doesn't send one): catalog what it reveals, never
                 # click anything inside it (issue #31)
                 peek = self.safety_service.is_peek_candidate(candidate.node, candidate.label)
+                if peek:
+                    self.logger.debug("Candidate %r is a peek target: cataloguing whatever it reveals without exploring further", candidate.label)
                 to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds], peek_only=peek)
                 repository.create_transition(
                     session_id=session_id,
@@ -504,12 +528,15 @@ class UiMapperService(MapperEngine):
         unconditionally, including these dead ends, over and over. This is what a user reported
         as an endless loop (issue #33)."""
         if not action.success or action.node_id is None:
+            self.logger.debug("Action %s (%r) not replayable: %s", action.id, action.label, "never clicked successfully" if not action.success else "no source node on file")
             return None
         transition = repository.find_transition_by_action(action.id)
         if transition is None or transition.to_screen_id is None:
+            self.logger.debug("Action %s (%r) not replayable: led nowhere recorded (dead end)", action.id, action.label)
             return None
         destination = repository.get_screen(transition.to_screen_id)
         if destination is not None and destination.expanded:
+            self.logger.debug("Action %s (%r) not replayable: destination screen %s is already fully expanded", action.id, action.label, destination.id)
             return None
         return repository.get_node(action.node_id)
 
@@ -539,8 +566,10 @@ class UiMapperService(MapperEngine):
         nodes = self.ui.dump_nodes()
         back_node = self._find_back_affordance(nodes, package_name)
         if back_node is not None:
+            self.logger.debug("Navigating back via in-app affordance %r", back_node.get("content_desc") or back_node.get("text"))
             self.ui.click_bounds(back_node["bounds"])
         else:
+            self.logger.debug("Navigating back via the system back button: no in-app back/up/close affordance found")
             self.adb.press_back()
 
     def _return_to_screen(self, package_name: str, ancestor_bounds: list[str], *, departed: bool) -> None:
