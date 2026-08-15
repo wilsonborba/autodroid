@@ -48,11 +48,13 @@ class SqlAlchemyMapperRepository:
         screen_key: str,
         depth: int,
         ordinal: int,
+        structural_signature: str | None = None,
         metadata_json: dict[str, Any] | None = None,
     ) -> MapperScreen:
         screen = MapperScreen(
             session_id=session_id,
             fingerprint=fingerprint,
+            structural_signature=structural_signature if structural_signature is not None else fingerprint,
             screen_key=screen_key,
             depth=depth,
             ordinal=ordinal,
@@ -102,6 +104,19 @@ class SqlAlchemyMapperRepository:
     def find_screen_by_fingerprint(self, session_id: int, fingerprint: str) -> MapperScreen | None:
         stmt = select(MapperScreen).where(MapperScreen.session_id == session_id, MapperScreen.fingerprint == fingerprint)
         return self.session.scalar(stmt)
+
+    def has_other_screen_with_structural_signature(self, session_id: int, structural_signature: str, *, exclude_screen_id: int) -> bool:
+        """Issue #30: is this screen another instance of a type already represented in this
+        session (e.g. yet another person's profile page)? Checked as soon as a screen is known
+        to be brand new, so a chain of same-type screens reached through each other (profile ->
+        connections -> profile -> connections -> ...) gets cut after the second one, not after
+        the first one's whole subtree finally finishes exploring."""
+        stmt = select(MapperScreen.id).where(
+            MapperScreen.session_id == session_id,
+            MapperScreen.structural_signature == structural_signature,
+            MapperScreen.id != exclude_screen_id,
+        ).limit(1)
+        return self.session.scalar(stmt) is not None
 
 
     def increment_screen_visit_count(self, screen_id: int) -> MapperScreen:

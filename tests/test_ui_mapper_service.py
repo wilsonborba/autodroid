@@ -24,6 +24,19 @@ MIXED_PACKAGE_ROOT = [
     {"text": "Clock", "content_desc": "", "resource_id": "clock", "class_name": "TextView", "bounds": "[90,0][100,10]", "clickable": True, "enabled": True, "package_name": "com.android.systemui"},
 ]
 
+
+def _profile_dump(name: str) -> list[dict]:
+    return [
+        {"resource_id": "profile_header", "text": name, "content_desc": "", "class_name": "TextView", "bounds": "[0,0][100,10]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"},
+        {"resource_id": "connections_link", "text": "Connections", "content_desc": "", "class_name": "TextView", "bounds": "[0,20][100,30]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"},
+    ]
+
+
+ROOT_TWO_PROFILES = [
+    {"resource_id": "open_profile_a", "text": "Profile A", "content_desc": "", "class_name": "TextView", "bounds": "[0,0][100,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"},
+    {"resource_id": "open_profile_b", "text": "Profile B", "content_desc": "", "class_name": "TextView", "bounds": "[0,10][100,20]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"},
+]
+
 _TEST_PACKAGE_NAMES = (
     "com.fresh.testapp", "com.dangerous.testapp", "com.reuse.testapp", "com.override.testapp",
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
@@ -391,3 +404,46 @@ def test_navigate_back_ignores_a_back_looking_button_from_another_package() -> N
 
     assert service.ui.clicks == []  # not trusted, could take us further from the target app
     assert service.adb.back_calls == 1
+
+
+def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:
+    # root -> Profile A (first of its type, fully explored, its Connections link gets tried) and
+    # Profile B (same structure, different text: recognized as another instance, deduped)
+    dumps = [ROOT_TWO_PROFILES, _profile_dump("Alice")] + [[]] * 8 + [_profile_dump("Bob")] + [[]] * 8
+    service = build_service(dumps)
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
+
+    assert result["screens_recorded"] == 3  # root, Alice, Bob: all recorded, coverage preserved
+    assert service.ui.clicks.count("[0,20][100,30]") == 1  # Connections: tried once (Alice), not for Bob
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, Bob
+        bob_screen = screens[2]
+        assert bob_screen.expanded is True  # deduped screens still end up expanded=True
+        assert repository.list_actions(result["session_id"], screen_id=bob_screen.id) == []  # never got its own candidates tried
+
+
+def _fixed_content_dump(section_text: str) -> list[dict]:
+    return [
+        {"resource_id": "scroll_container", "text": "", "content_desc": "", "class_name": "ScrollView", "bounds": "[0,0][100,800]", "clickable": False, "enabled": True, "scrollable": True, "package_name": "com.target.testapp"},
+        {"resource_id": "section_text", "text": section_text, "content_desc": "", "class_name": "TextView", "bounds": "[0,50][100,100]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"},
+    ]
+
+
+def test_scrolling_a_fixed_content_page_accumulates_into_the_same_screen() -> None:
+    # each "scroll" reveals a different section (About, Experience, Education), reaching a fixed
+    # end (repeats "Education" once we're at the bottom): a profile-like page, not a feed
+    sections = ["About", "Experience", "Education", "Education", "Education", "Education", "Education"]
+    dumps = [_fixed_content_dump(s) for s in sections]
+    service = build_service(dumps)
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
+
+    assert result["screens_recorded"] == 1  # not one screen per scroll position
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screen = repository.list_screens(result["session_id"])[0]
+        node_texts = {node.text for node in repository.get_screen(screen.id).nodes}
+        assert {"About", "Experience", "Education"} <= node_texts  # all sections accumulated here
