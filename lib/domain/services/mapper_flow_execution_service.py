@@ -51,6 +51,7 @@ class MapperFlowExecutionService:
             "click": self._execute_click,
             "click_first_match": self._execute_click_first_match,
             "click_bounds": self._execute_click_bounds,
+            "type_text": self._execute_type_text,
             "scroll_up": self._execute_scroll_up,
             "back": self._execute_back,
             "wait": self._execute_wait,
@@ -402,6 +403,16 @@ class MapperFlowExecutionService:
         if not bounds:
             return {"success": False}
         return {"success": self.ui.click_bounds(bounds)}
+
+    def _execute_type_text(self, step: MapperFlowStep) -> dict[str, Any]:
+        # types into whichever field is already focused (issue #35): this never identifies a
+        # target itself, the caller clicks the field first (click/click_bounds), one thing per
+        # step, same shape as click_bounds
+        selector = step.selector_json or {}
+        text = selector.get("text")
+        if not text:
+            return {"success": False}
+        return {"success": self.ui.type_text(text, clear=bool(selector.get("clear")))}
 
     def _execute_scroll_up(self, step: MapperFlowStep) -> dict[str, Any]:
         self.ui.swipe_up()

@@ -80,6 +80,8 @@ class FakeUi:
         self.screenshots: list[str] = []
         self.clicked_bounds: list[str] = []
         self.click_bounds_result = True
+        self.typed_text: list[tuple[str, bool]] = []
+        self.type_text_result = True
         # dumps are consumed one per call; once exhausted, the last one repeats (simulates the
         # screen "settling" once there's no more new content to scroll into)
         self.dump_sequence = list(dump_sequence) if dump_sequence else [[{"text": "hello"}]]
@@ -107,6 +109,10 @@ class FakeUi:
     def click_bounds(self, bounds: str) -> bool:
         self.clicked_bounds.append(bounds)
         return self.click_bounds_result
+
+    def type_text(self, text: str, *, clear: bool = False) -> bool:
+        self.typed_text.append((text, clear))
+        return self.type_text_result
 
 
 class FakeAdb:
@@ -154,6 +160,7 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
         "click": service._execute_click,
         "click_first_match": service._execute_click_first_match,
         "click_bounds": service._execute_click_bounds,
+        "type_text": service._execute_type_text,
         "scroll_up": service._execute_scroll_up,
         "back": service._execute_back,
         "wait": service._execute_wait,
@@ -203,6 +210,36 @@ def test_click_bounds_step_fails_without_bounds() -> None:
 
     assert result["success"] is False
     assert service.ui.clicked_bounds == []
+
+
+def test_type_text_step_types_into_the_focused_field() -> None:
+    service = build_service()
+    step = make_step(action_type="type_text", selector_json={"text": "Congrats on the launch!"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.typed_text == [("Congrats on the launch!", False)]
+
+
+def test_type_text_step_passes_clear_flag_through() -> None:
+    service = build_service()
+    step = make_step(action_type="type_text", selector_json={"text": "replacement", "clear": True})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.typed_text == [("replacement", True)]
+
+
+def test_type_text_step_fails_without_text() -> None:
+    service = build_service()
+    step = make_step(action_type="type_text", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.typed_text == []
 
 
 def test_ocr_extract_step_returns_text_regions() -> None:

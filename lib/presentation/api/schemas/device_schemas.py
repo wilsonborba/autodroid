@@ -20,8 +20,8 @@ class DeviceActionRequest(BaseModel):
     )
     action_type: str | None = Field(
         default=None,
-        description="One of click, click_first_match, click_bounds, scroll_up, back, wait, "
-        "dump_nodes, screenshot, ocr_extract. Runs against whatever's on screen. "
+        description="One of click, click_first_match, click_bounds, type_text, scroll_up, back, "
+        "wait, dump_nodes, screenshot, ocr_extract. Runs against whatever's on screen. "
         "Mutually exclusive with target_action_id.",
     )
     target_screen_id: int | None = Field(
@@ -32,7 +32,8 @@ class DeviceActionRequest(BaseModel):
     selector: dict[str, Any] | None = Field(
         default=None,
         description="Shape depends on action_type: click wants {\"candidates\": [str, ...]}, "
-        "click_bounds wants {\"bounds\": \"[x1,y1][x2,y2]\"}, the rest ignore this field.",
+        "click_bounds wants {\"bounds\": \"[x1,y1][x2,y2]\"}, type_text wants {\"text\": str, "
+        "\"clear\": bool} (typed into whatever is currently focused), the rest ignore this field.",
     )
     params: dict[str, Any] | None = Field(
         default=None,
