@@ -244,9 +244,7 @@ class UiMapperService(MapperEngine):
                 # already fully processed in an earlier pass; only re-walk into it (via its own
                 # already-successful actions) to reach children that might still need expanding
                 for action in repository.list_actions(session_id, screen_id=screen.id, executed=True):
-                    if not action.success or action.node_id is None:
-                        continue
-                    node = repository.get_node(action.node_id)
+                    node = self._replay_target(repository, action)
                     if node is None or not node.bounds:
                         continue
                     if self.ui.click_bounds(node.bounds):
@@ -324,11 +322,10 @@ class UiMapperService(MapperEngine):
             if existing_action is not None:
                 # already tried in an earlier pass (e.g. resumed after a crash mid-screen);
                 # don't re-classify/re-record it, just replay it if it's known to lead somewhere
-                if existing_action.executed and existing_action.success and existing_action.node_id:
-                    existing_node = repository.get_node(existing_action.node_id)
-                    if existing_node and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
-                        replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
-                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
+                existing_node = self._replay_target(repository, existing_action)
+                if existing_node is not None and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
+                    replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
+                    self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
                 continue
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
@@ -408,6 +405,24 @@ class UiMapperService(MapperEngine):
             return True
         return False
 
+    def _replay_target(self, repository: SqlAlchemyMapperRepository, action: Any) -> Any | None:
+        """An already-recorded action is only worth replaying if it's known to lead somewhere
+        still worth reaching: a real destination screen that isn't already fully explored. A
+        click that failed, left the app, or leads to a screen that's already expanded just
+        wastes a round trip re-doing work that's either useless or already done, and every time
+        the current screen gets revisited, ALL of its recorded actions used to be replayed
+        unconditionally, including these dead ends, over and over. This is what a user reported
+        as an endless loop (issue #33)."""
+        if not action.success or action.node_id is None:
+            return None
+        transition = repository.find_transition_by_action(action.id)
+        if transition is None or transition.to_screen_id is None:
+            return None
+        destination = repository.get_screen(transition.to_screen_id)
+        if destination is not None and destination.expanded:
+            return None
+        return repository.get_node(action.node_id)
+
     def _scroll_and_catalog(
         self,
         repository: SqlAlchemyMapperRepository,
@@ -428,20 +443,29 @@ class UiMapperService(MapperEngine):
         its first viewport has been clicked through. A feed genuinely keeps producing new
         content on every scroll, so this naturally keeps going for it too, up to the same
         repeat-signature cutoff as before (#25), just without minting a new `MapperScreen` per
-        scroll along the way."""
+        scroll along the way.
+
+        `max_scrolls` is a per-screen ceiling, checked against a counter local to this call, not
+        `state["scrolls_used"]` (that one keeps counting for the whole session, only for the
+        final report): a feed-like root screen that happens to need many scrolls to settle
+        (issue #25's own repeat cutoff is content-dependent, it can legitimately take a while)
+        must not eat into every other screen's own scroll budget for the rest of the run, that
+        starved every screen mapped afterward (issue #33)."""
         accumulated_nodes = list(initial_nodes)
         seen_keys = set(node_id_by_key)
         previous_signature = self.fingerprint_service.structural_signature(initial_nodes)
         consecutive_repeat_count = 0
         current_nodes = initial_nodes
+        screen_scrolls_used = 0
 
         while (
             any(node.get("scrollable") for node in current_nodes)
             and max_scrolls > 0
-            and state["scrolls_used"] < max_scrolls
+            and screen_scrolls_used < max_scrolls
             and consecutive_repeat_count < repeat_signature_threshold
         ):
             self.ui.swipe_up()
+            screen_scrolls_used += 1
             state["scrolls_used"] += 1
             current_nodes = self.ui.dump_nodes()
 
