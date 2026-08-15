@@ -27,3 +27,18 @@ def test_mapper_run_endpoint(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["session_id"] == 99
+
+
+class FakeMapperExportService:
+    def export_session(self, session_id: int, output_dir):
+        return output_dir / f"mapper_session_{session_id}"
+
+
+def test_mapper_export_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr('lib.presentation.api.routes.mapper.get_mapper_export_service', lambda: FakeMapperExportService())
+    client = TestClient(create_api_app())
+
+    response = client.post('/mapper/sessions/42/export')
+
+    assert response.status_code == 200
+    assert response.json()['session_id'] == 42
