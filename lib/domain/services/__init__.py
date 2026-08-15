@@ -5,3 +5,5 @@ __all__ = ["NavigationContextService", "ResumeContext"]
 from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_export_service import MapperExportService
 from lib.domain.services.mapper_mode_service import MapperModeService
+
+from lib.domain.services.ui_mapper_service import UiMapperService

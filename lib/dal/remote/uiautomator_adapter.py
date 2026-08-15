@@ -68,6 +68,14 @@ class UiAutomatorAdapter:
                 "resource_id": (node.attrib.get("resource-id") or "").strip(),
                 "class_name": (node.attrib.get("class") or "").strip(),
                 "bounds": (node.attrib.get("bounds") or "").strip(),
+                "clickable": (node.attrib.get("clickable") or "false") == "true",
+                "enabled": (node.attrib.get("enabled") or "true") == "true",
+                "checkable": (node.attrib.get("checkable") or "false") == "true",
+                "checked": (node.attrib.get("checked") or "false") == "true",
+                "focusable": (node.attrib.get("focusable") or "false") == "true",
+                "scrollable": (node.attrib.get("scrollable") or "false") == "true",
+                "long_clickable": (node.attrib.get("long-clickable") or "false") == "true",
+                "package_name": (node.attrib.get("package") or "").strip(),
             }
             if item["text"] or item["content_desc"] or item["resource_id"]:
                 nodes.append(item)
@@ -81,3 +89,17 @@ class UiAutomatorAdapter:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.device.screenshot(str(path))
         return path
+
+    def click_bounds(self, bounds: str) -> bool:
+        try:
+            left_top, right_bottom = bounds.strip('[]').split('][')
+            x1, y1 = [int(value) for value in left_top.split(',')]
+            x2, y2 = [int(value) for value in right_bottom.split(',')]
+        except Exception:
+            return False
+        self.device.click((x1 + x2) // 2, (y1 + y2) // 2)
+        time.sleep(1)
+        return True
+
+    def dump_hierarchy_text(self) -> str:
+        return self.device.dump_hierarchy(compressed=False)
