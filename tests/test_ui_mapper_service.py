@@ -42,6 +42,7 @@ _TEST_PACKAGE_NAMES = (
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
     "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
+    "com.candidatelog.testapp", "com.replaylog.testapp",
 )
 
 
@@ -123,6 +124,17 @@ def test_fresh_mapper_run_light_mode_records_root_and_leaf() -> None:
         mapper_session = repository.get_session(result["session_id"])
         assert mapper_session.explored_up_to_depth == 1
         assert mapper_session.status == MapperSessionStatus.COMPLETED
+
+
+def test_candidate_and_click_outcome_are_logged_at_debug_level(caplog) -> None:
+    caplog.set_level("DEBUG")
+    service = build_service([ROOT_NODES, LEAF_NODES])
+
+    service.run(MapperRunConfig(package_name="com.candidatelog.testapp", mode=MapperMode.LIGHT))
+
+    messages = [record.message for record in caplog.records]
+    assert any("Candidate found: 'Profile'" in message for message in messages)
+    assert any(message.startswith("Clicked 'Profile'") and "success=True" in message for message in messages)
 
 
 def test_dangerous_action_is_blocked_by_default() -> None:
@@ -581,6 +593,31 @@ def test_replay_target_skips_dead_ends_and_already_expanded_destinations() -> No
         target = service._replay_target(repository, repository.get_action(action_to_open_id))
         assert target is not None
         assert target.bounds == "[0,20][10,30]"
+
+
+def test_replay_target_logs_why_an_action_is_not_replayable(caplog) -> None:
+    # issue #38: this is exactly the kind of "it clicked here but didn't recognize X" tracking
+    # detail asked for, the reason has to be readable from the log, not just inferred
+    caplog.set_level("DEBUG")
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.replaylog.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        screen_a = repository.create_screen(session_id=mapper_session.id, fingerprint="a", screen_key="a", depth=0, ordinal=0)
+        screen_b_expanded = repository.create_screen(session_id=mapper_session.id, fingerprint="b", screen_key="b", depth=1, ordinal=1)
+        repository.mark_screen_expanded(screen_b_expanded.id)
+
+        node = repository.create_node(screen_id=screen_a.id, node_key="node-ToExpanded", text="ToExpanded", clickable=True, bounds="[0,0][10,10]")
+        action = repository.create_action(session_id=mapper_session.id, screen_id=screen_a.id, node_id=node.id, action_key="click:ToExpanded", action_type="click", label="ToExpanded", safety=MapperActionSafety.SAFE, executed=True, success=True)
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=screen_a.id, action_id=action.id, to_screen_id=screen_b_expanded.id, result_type="clicked")
+        session.commit()
+        action_id = action.id
+
+    service = build_service([])
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        service._replay_target(repository, repository.get_action(action_id))
+
+    assert any("already fully expanded" in record.message for record in caplog.records)
 
 
 class _EventLoggingUi(FakeUi):
