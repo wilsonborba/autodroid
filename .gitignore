@@ -11,3 +11,5 @@ node_modules/
 output/
 var/
 .alembic/
+*.egg-info/
+docs/

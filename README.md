@@ -1,6 +1,6 @@
 # autodroid
 
-Android automation worker com fila persistente, `CLI`, `API` e adapters por aplicativo.
+Android automation worker com fila persistente, `CLI`, `API`, adapters por aplicativo e mapper local de UI Android.
 
 ## Sprint 1
 
@@ -12,6 +12,17 @@ A Sprint 1 entrega:
 - `API` com `FastAPI`
 - adapter inicial do LinkedIn com job `linkedin.extract_profile_basic`
 - OCR com `PaddleOCR` apenas como fallback
+
+## Sprint 1.1
+
+A Sprint 1.1 entrega o `UI Mapper` local:
+- persistência local do mapper em SQLite
+- exploração por níveis `light`, `medium` e `deep`
+- fingerprint de telas e mitigação básica de loops
+- guard rails de `dangerous actions` por padrão
+- override explícito para desabilitar o bloqueio de ações perigosas
+- `CLI` e `API` para operações principais do mapper
+- export local estruturado por sessão
 
 ## Arquitetura
 
@@ -35,7 +46,7 @@ lib/
 - Python `3.11+`
 - `adb` disponível no `PATH`
 - Android Worker acessível em `ANDROID_SERIAL`
-- app do LinkedIn instalado no Android virtual
+- app alvo instalado no Android virtual
 
 ## Setup local
 
@@ -43,7 +54,7 @@ lib/
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-python -m alembic upgrade head
+autodroid db upgrade
 ```
 
 ## Variáveis principais
@@ -55,18 +66,12 @@ python -m alembic upgrade head
 - `LINKEDIN_PACKAGE_NAME` — padrão `com.linkedin.android`
 - `AUTODROID_OUTPUT_DIR` — padrão `output`
 
-## CLI
+## CLI de jobs/worker
 
 Criar job do LinkedIn:
 
 ```bash
 autodroid jobs create linkedin.extract_profile_basic linkedin --payload '{"scrolls": 2}'
-```
-
-Listar jobs:
-
-```bash
-autodroid jobs list
 ```
 
 Executar uma iteração do dispatcher:
@@ -75,13 +80,7 @@ Executar uma iteração do dispatcher:
 autodroid worker run --iterations 1
 ```
 
-Consultar worker:
-
-```bash
-autodroid worker status --as-json
-```
-
-## API
+## API base
 
 Subir API local:
 
@@ -98,27 +97,72 @@ Rotas iniciais:
 - `POST /jobs/{job_id}/reprioritize`
 - `GET /workers/main`
 
-## Migrações
+## UI Mapper
 
-Aplicar:
+### Níveis
+
+- `light`
+  - execução em minutos
+  - exploração rasa
+  - poucas transições principais
+- `medium`
+  - execução em horas
+  - exploração moderada com mais ações e scrolls
+- `deep`
+  - exploração extensiva
+  - pode levar muitas horas ou mais, dependendo do app e dos limites
+
+### Segurança
+
+- ações perigosas são puladas por padrão
+- exemplos: `delete`, `logout`, `send`, `post`, `purchase`, `submit`
+- a proteção pode ser desabilitada explicitamente quando necessário
+
+### CLI do mapper
+
+Rodar mapper:
 
 ```bash
-autodroid db upgrade
+autodroid mapper run com.linkedin.android --mode light
 ```
 
-## LinkedIn
+Listar sessões:
 
-Job inicial:
-- `linkedin.extract_profile_basic`
+```bash
+autodroid mapper sessions --as-json
+```
 
-Fluxo:
-- vai para `HOME`
-- faz `force-stop` do app alvo
-- abre o LinkedIn
-- tenta abrir a área de perfil
-- coleta textos visíveis pela árvore de UI
-- cai para screenshot + OCR só se necessário
-- persiste o resultado no job
+Mostrar sessão:
+
+```bash
+autodroid mapper show 1 --as-json
+```
+
+Exportar sessão:
+
+```bash
+autodroid mapper export 1
+```
+
+### API do mapper
+
+- `POST /mapper/run`
+- `GET /mapper/sessions`
+- `GET /mapper/sessions/{session_id}`
+- `POST /mapper/sessions/{session_id}/export`
+
+### Artefatos locais
+
+O mapper gera dados potencialmente sensíveis e privados. Esses artefatos:
+- ficam apenas localmente
+- não devem subir para o Git
+- podem conter estrutura de telas, textos visíveis e outros dados de navegação
+
+Diretório padrão de export local:
+
+```text
+output/mappers/
+```
 
 ## Política da Sprint 1
 
