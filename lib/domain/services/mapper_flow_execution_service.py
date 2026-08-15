@@ -9,13 +9,16 @@ from lib.core.settings import Settings
 from lib.core.utils.clock import local_now
 from lib.dal.local.database import session_scope
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
+from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.ocr_adapter import OcrAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep
 from lib.domain.models.mapper_types import MapperActionSafety, MapperFlowFailureType
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
+from lib.domain.services.mapper_route_planner_service import RESTART, MapperRoutePlannerService, RestartOption
 from lib.domain.services.mapper_safety_service import MapperSafetyService
+from lib.domain.services.navigation_context_service import NavigationContextService
 
 
 class MapperFlowExecutionService:
@@ -40,6 +43,7 @@ class MapperFlowExecutionService:
         self.adb = AdbAdapter(settings.android_serial)
         self.ui = UiAutomatorAdapter(settings.android_serial)
         self.ocr = OcrAdapter(settings.ocr_language)
+        self.navigation_context = NavigationContextService(self.adb)
         self.safety_service = MapperSafetyService()
         self.fingerprint_service = MapperFingerprintService()
         self._handlers = {
@@ -65,6 +69,79 @@ class MapperFlowExecutionService:
             "name": flow.name,
             "package_name": flow.package_name,
             "steps": results,
+        }
+
+    def navigate(
+        self,
+        *,
+        package_name: str,
+        session_id: int,
+        current_screen_id: int,
+        target_screen_id: int,
+        restart_option: RestartOption,
+        restart_steps: list[MapperFlowStep],
+    ) -> dict[str, Any]:
+        """Bridges the gap between where the device is now and where a mapped step needs to
+        start, deciding at runtime between a direct path through the mapped graph and a restart
+        (issue #24): this is the concrete "RoutePlanner -> Worker executes -> measure -> learn"
+        loop from the issue's architecture. `run_flow` doesn't call this automatically for every
+        step yet (that needs `run_flow` to track "current screen" via each step's resolved
+        transition, a follow-up wiring pass); this method is the working, tested integration
+        point a caller (or a future `run_flow` enhancement) uses once it has both screen ids."""
+        if current_screen_id == target_screen_id:
+            return {"strategy_type": "already_there", "reason": "same_screen", "success": True, "duration_ms": 0.0}
+
+        with session_scope() as session:
+            planner = MapperRoutePlannerService(session)
+            plan = planner.plan(
+                session_id=session_id, current_screen_id=current_screen_id, target_screen_id=target_screen_id,
+                restart_option=restart_option,
+            )
+            mapper_repository = SqlAlchemyMapperRepository(session)
+            route_edges: list[tuple[int, str | None]] = []
+            for transition in plan.route:
+                action = mapper_repository.get_action(transition.action_id)
+                node = mapper_repository.get_node(action.node_id) if action and action.node_id else None
+                route_edges.append((transition.id, node.bounds if node else None))
+
+        started_at = time.monotonic()
+        success = True
+        transition_observations: list[tuple[int, float, bool]] = []
+        if plan.strategy_type == RESTART:
+            self.navigation_context.prepare_fresh_app_launch(package_name)
+            for step in restart_steps:
+                outcome = self.run_step(step)
+                if not outcome.get("success", True):
+                    success = False
+        else:
+            # timed per edge, not just for the whole route, so `MapperTransitionPerformance`
+            # actually learns from real runs instead of staying at its cold-start default forever
+            for transition_id, bounds in route_edges:
+                edge_started_at = time.monotonic()
+                edge_success = bounds is not None and self.ui.click_bounds(bounds)
+                transition_observations.append((transition_id, (time.monotonic() - edge_started_at) * 1000, edge_success))
+                if not edge_success:
+                    success = False
+                    break
+        duration_ms = (time.monotonic() - started_at) * 1000
+
+        with session_scope() as session:
+            MapperRoutePlannerService(session).record_execution(
+                plan, actual_duration_ms=duration_ms, success=success,
+                transition_observations=transition_observations or None,
+            )
+
+        self.logger.info(
+            "Navigated screen %s -> %s via %s (%s) in %.0fms success=%s",
+            current_screen_id, target_screen_id, plan.strategy_type, plan.reason, duration_ms, success,
+        )
+        return {
+            "strategy_type": plan.strategy_type,
+            "reason": plan.reason,
+            "route_signature": plan.route_signature,
+            "estimated_duration_ms": plan.estimated_duration_ms,
+            "duration_ms": duration_ms,
+            "success": success,
         }
 
     def run_step(self, step: MapperFlowStep, *, flow_id: int | None = None, skip_dangerous_actions: bool = True) -> dict[str, Any]:
