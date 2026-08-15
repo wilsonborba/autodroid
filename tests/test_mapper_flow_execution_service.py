@@ -507,6 +507,32 @@ def test_navigate_walks_direct_path_and_records_route_performance() -> None:
         assert transition_perf.success_count == 1
 
 
+def test_navigate_logs_the_chosen_strategy_and_each_edge_attempted(caplog) -> None:
+    # issue #40's system-wide follow-up to #38: gap-bridging decisions narrated at debug level
+    # too, not just the mapper's own exploration
+    caplog.set_level("DEBUG")
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.navigatelog.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=3, max_actions=20, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root", screen_key="root", depth=0, ordinal=0)
+        target = repository.create_screen(session_id=mapper_session.id, fingerprint="target", screen_key="target", depth=1, ordinal=1)
+        node = repository.create_node(screen_id=root.id, node_key="node", text="Go", clickable=True, bounds="[0,0][10,10]")
+        action = repository.create_action(session_id=mapper_session.id, screen_id=root.id, node_id=node.id, action_key="click:go", action_type="click", label="Go", safety=MapperActionSafety.SAFE)
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=root.id, action_id=action.id, to_screen_id=target.id, result_type="clicked")
+        session.commit()
+        session_id, root_id, target_id = mapper_session.id, root.id, target.id
+
+    service = build_service()
+    service.navigate(
+        package_name="com.navigatelog.testapp", session_id=session_id, current_screen_id=root_id, target_screen_id=target_id,
+        restart_option=RestartOption(root_screen_id=root_id, ancestor_step_ids=[]), restart_steps=[],
+    )
+
+    messages = [record.message for record in caplog.records]
+    assert any("Route planner chose direct_path" in message for message in messages)
+    assert any("bounds=[0,0][10,10]" in message and "success=True" in message for message in messages)
+
+
 def test_navigate_restarts_and_replays_ancestor_steps_when_no_direct_path_exists() -> None:
     service = build_service()
     ancestor_step = make_step(id=501, action_type="click", selector_json={"candidates": ["Home"]})

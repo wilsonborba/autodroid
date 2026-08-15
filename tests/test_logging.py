@@ -4,12 +4,17 @@ import logging
 import logging.handlers
 from pathlib import Path
 
-from lib.core.logs import LogTarget, StructuredFormatter, configure_logging
+from lib.core.logs import _MANAGED_HANDLER_ATTR, LogTarget, StructuredFormatter, configure_logging
 
 
 def _stream_handler(root_logger: logging.Logger) -> logging.Handler:
-    # RotatingFileHandler subclasses StreamHandler too, this is how the two get told apart
-    return next(h for h in root_logger.handlers if not isinstance(h, logging.FileHandler))
+    # pytest attaches its own handlers to the root logger too (live-log capture, caplog),
+    # picking anything managed by configure_logging that isn't the file handler is what
+    # actually identifies the one it created, not just "not a FileHandler"
+    return next(
+        h for h in root_logger.handlers
+        if getattr(h, _MANAGED_HANDLER_ATTR, False) and not isinstance(h, logging.FileHandler)
+    )
 
 
 def test_plain_formatter_includes_source_and_line() -> None:
@@ -72,7 +77,12 @@ def test_configure_logging_sets_api_info_by_default() -> None:
 def test_configure_logging_without_a_log_file_adds_no_file_handler() -> None:
     configure_logging(debug=False, verbose=False, target=LogTarget.CLI, log_file=None)
     root_logger = logging.getLogger()
-    assert not any(isinstance(h, logging.FileHandler) for h in root_logger.handlers)
+    # pytest attaches its own FileHandler to the root logger too (its own log capture), the
+    # check has to be scoped to what configure_logging itself manages
+    assert not any(
+        isinstance(h, logging.FileHandler) and getattr(h, _MANAGED_HANDLER_ATTR, False)
+        for h in root_logger.handlers
+    )
 
 
 def test_configure_logging_file_handler_always_captures_debug(tmp_path: Path) -> None:
@@ -92,7 +102,10 @@ def test_configure_logging_file_handler_rotates_instead_of_growing_forever(tmp_p
     log_file = tmp_path / "autodroid.log"
     configure_logging(debug=False, verbose=False, target=LogTarget.CLI, log_file=log_file)
     root_logger = logging.getLogger()
-    file_handler = next(h for h in root_logger.handlers if isinstance(h, logging.FileHandler))
+    file_handler = next(
+        h for h in root_logger.handlers
+        if isinstance(h, logging.FileHandler) and getattr(h, _MANAGED_HANDLER_ATTR, False)
+    )
     assert isinstance(file_handler, logging.handlers.RotatingFileHandler)
     assert file_handler.maxBytes > 0
     assert file_handler.backupCount > 0

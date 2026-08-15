@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import time as time_module
 from datetime import datetime, time
 
 import typer
@@ -8,7 +10,7 @@ from alembic import command
 from alembic.config import Config
 
 from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
-from lib.core.logs import LogTarget, configure_logging
+from lib.core.logs import LogTarget, configure_logging, get_logger
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
@@ -34,9 +36,23 @@ mapper_app.add_typer(flow_app, name="flow")
 
 
 @app.callback()
-def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable detailed CLI logs")) -> None:
+def main(ctx: typer.Context, verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable detailed CLI logs")) -> None:
     settings = get_settings()
     configure_logging(debug=settings.debug, verbose=verbose, target=LogTarget.CLI, log_file=settings.log_file)
+
+    # every CLI invocation, not just the mapper (issue #40's system-wide follow-up to #38): a
+    # nested subcommand's own arguments aren't resolved yet at this point, sys.argv is what
+    # actually captures the full command regardless of how deep the subcommand nesting goes
+    logger = get_logger("lib.presentation.cli")
+    invocation = " ".join(sys.argv[1:])
+    started_at = time_module.monotonic()
+    logger.debug("CLI invoked: %s", invocation)
+
+    def _log_completion() -> None:
+        duration_ms = (time_module.monotonic() - started_at) * 1000
+        logger.debug("CLI finished: %s (%.0fms)", invocation, duration_ms)
+
+    ctx.call_on_close(_log_completion)
 
 
 def _parse_json_payload(raw: str | None) -> dict:

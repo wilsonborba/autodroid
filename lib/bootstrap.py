@@ -13,6 +13,7 @@ from lib.domain.services.automation_service import AutomationRegistryService
 from lib.domain.services.dispatcher_service import DispatcherService
 from lib.domain.services.local_mapper_export_service import LocalMapperExportService
 from lib.domain.services.mapper_remap_task import MapperRemapTask
+from lib.presentation.api.middleware import RequestLoggingMiddleware
 from lib.presentation.api.routes.device_actions import router as device_actions_router
 from lib.presentation.api.routes.jobs import router as jobs_router
 from lib.presentation.api.routes.logs_stream import router as logs_stream_router
@@ -117,6 +118,7 @@ def create_api_app() -> FastAPI:
     settings = get_settings()
     configure_logging(debug=settings.debug, verbose=False, target=LogTarget.API, log_file=settings.log_file)
     app = FastAPI(title="autodroid", version="0.1.0", description=API_DESCRIPTION, openapi_tags=API_TAGS, docs_url=None)
+    app.add_middleware(RequestLoggingMiddleware)
     app.include_router(jobs_router)
     app.include_router(mapper_router)
     app.include_router(mapper_flows_router)
