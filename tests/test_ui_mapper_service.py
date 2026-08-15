@@ -41,7 +41,7 @@ _TEST_PACKAGE_NAMES = (
     "com.fresh.testapp", "com.dangerous.testapp", "com.reuse.testapp", "com.override.testapp",
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
-    "com.scrollbudget.testapp", "com.replay.testapp",
+    "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
 )
 
 
@@ -291,17 +291,17 @@ def _feed_dump(item_text: str) -> list[dict]:
     ]
 
 
-def test_scroll_stops_at_the_mode_repeat_threshold_not_at_max_scrolls() -> None:
-    # each dump has different text (so a text-based fingerprint would never converge) but the
-    # exact same structure, simulating a feed. light's repeat_signature_threshold is 20 and its
-    # max_scrolls is 30, so if the cutoff is working, it stops well before the safety ceiling.
-    dumps = [_feed_dump(f"Post {i}") for i in range(30)]
+def test_scroll_stops_after_consecutive_empty_scrolls_not_at_max_scrolls() -> None:
+    # the first two scrolls reveal genuinely new posts, then it "hits bottom" and repeats
+    # forever: light's max_consecutive_empty_scrolls is 3, max_scrolls is 30, so if the early
+    # exit is working, it stops well before the safety ceiling (issue #34)
+    dumps = [_feed_dump("Post 0"), _feed_dump("Post 1"), _feed_dump("Post 2")] + [_feed_dump("Post 2")] * 10
     service = build_service(dumps)
 
     result = service.run(MapperRunConfig(package_name="com.feedscroll.testapp", mode=MapperMode.LIGHT))
 
     limits = MapperModeService().get_limits(MapperMode.LIGHT)
-    assert service.ui.swipes == limits.repeat_signature_threshold
+    assert service.ui.swipes == 5  # 2 scrolls with new content + 3 confirming nothing more is coming
     assert service.ui.swipes < limits.max_scrolls
     assert result["status"] == "completed"
 
@@ -477,26 +477,23 @@ def _scrollable_dump(section_text: str) -> list[dict]:
 
 
 def test_scroll_budget_is_per_screen_not_shared_across_the_session() -> None:
-    # issue #33: a root screen that already used up the whole session's scroll counter must not
-    # leave every screen mapped afterward with zero scrolls of its own
+    # issue #33: a screen that already used up the whole session's scroll counter must not leave
+    # every screen mapped afterward with zero scrolls of its own. Content differs every scroll
+    # (new node_key each time), so max_consecutive_empty_scrolls never triggers, only max_scrolls
+    # (the per-screen ceiling) decides when this particular screen stops.
+    service = build_service([_scrollable_dump(f"content-{i}") for i in range(5)])
+    state = {"screens_recorded": 0, "actions_executed": 0, "scrolls_used": 3, "revisited_screens": 0}  # 3 already "spent" elsewhere this session
+
     with SessionLocal() as session:
         repository = SqlAlchemyMapperRepository(session)
         mapper_session = repository.create_session(package_name="com.scrollbudget.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=3)
-        screen = repository.create_screen(session_id=mapper_session.id, fingerprint="root", screen_key="root", depth=0, ordinal=0)
         session.commit()
-        screen_id = screen.id
+        session_id = mapper_session.id
 
-    service = build_service([])
-    service.ui.dumps = [_scrollable_dump(f"content-{i}") for i in range(5)]
-    state = {"screens_recorded": 1, "actions_executed": 0, "scrolls_used": 3, "revisited_screens": 0}  # 3 already "spent" elsewhere this session
-
-    with SessionLocal() as session:
-        repository = SqlAlchemyMapperRepository(session)
-        screen = repository.get_screen(screen_id)
-        service._scroll_and_catalog(
-            repository, screen, _scrollable_dump("content-initial"), {},
-            max_scrolls=3, repeat_signature_threshold=100,
-            package_name="com.scrollbudget.testapp", ancestor_bounds=[], state=state,
+        service._explore(
+            repository, session_id, depth=0, state=state, visited_this_pass=set(),
+            max_depth=1, max_actions=8, max_scrolls=3, max_consecutive_empty_scrolls=100,
+            config_skip_dangerous_actions=True, package_name="com.scrollbudget.testapp",
         )
         session.commit()
 
@@ -540,3 +537,43 @@ def test_replay_target_skips_dead_ends_and_already_expanded_destinations() -> No
         target = service._replay_target(repository, repository.get_action(action_to_open_id))
         assert target is not None
         assert target.bounds == "[0,20][10,30]"
+
+
+class _EventLoggingUi(FakeUi):
+    def __init__(self, dumps: list[list[dict]]) -> None:
+        super().__init__(dumps)
+        self.events: list[str] = []
+
+    def swipe_up(self) -> None:
+        super().swipe_up()
+        self.events.append("swipe")
+
+    def click_bounds(self, bounds: str) -> bool:
+        self.events.append(f"click:{bounds}")
+        return super().click_bounds(bounds)
+
+
+def test_scroll_and_interact_are_interleaved_not_scroll_then_click_at_the_end() -> None:
+    # issue #34: a candidate revealed by a scroll is tried right away, not deferred until every
+    # last scroll has finished; proven by checking the swipe/click order, not just the counts
+    scroll_container = {"resource_id": "scroll", "text": "", "content_desc": "", "class_name": "ScrollView", "bounds": "[0,0][100,800]", "clickable": False, "enabled": True, "scrollable": True, "package_name": "com.interleave.testapp"}
+    item_a = {"resource_id": "item_a", "text": "Item A", "content_desc": "", "class_name": "TextView", "bounds": "[0,50][100,60]", "clickable": True, "enabled": True, "package_name": "com.interleave.testapp"}
+    item_b = {"resource_id": "item_b", "text": "Item B", "content_desc": "", "class_name": "TextView", "bounds": "[0,70][100,80]", "clickable": True, "enabled": True, "package_name": "com.interleave.testapp"}
+    root = [scroll_container]
+    after_scroll_1 = [scroll_container, item_a]
+    after_scroll_2 = [scroll_container, item_a, item_b]
+    dead_end: list[dict] = []
+
+    service = build_service([])
+    service.ui = _EventLoggingUi([
+        root, after_scroll_1, dead_end, dead_end, after_scroll_2, dead_end, dead_end,
+        after_scroll_2, after_scroll_2, after_scroll_2,
+    ])
+
+    service.run(MapperRunConfig(package_name="com.interleave.testapp", mode=MapperMode.LIGHT))
+
+    assert service.ui.events == [
+        "swipe", "click:[0,50][100,60]",
+        "swipe", "click:[0,70][100,80]",
+        "swipe", "swipe", "swipe",
+    ]

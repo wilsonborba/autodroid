@@ -107,7 +107,7 @@ class UiMapperService(MapperEngine):
                 max_depth=limits.max_depth,
                 max_actions=limits.max_actions,
                 max_scrolls=limits.max_scrolls,
-                repeat_signature_threshold=limits.repeat_signature_threshold,
+                max_consecutive_empty_scrolls=limits.max_consecutive_empty_scrolls,
                 metadata_json={"mode": config.mode.value},
             )
             mapper_session.status = MapperSessionStatus.RUNNING
@@ -132,7 +132,7 @@ class UiMapperService(MapperEngine):
             mapper_session.max_depth = target_max_depth
             mapper_session.max_actions = max(mapper_session.max_actions, limits.max_actions)
             mapper_session.max_scrolls = max(mapper_session.max_scrolls, limits.max_scrolls)
-            mapper_session.repeat_signature_threshold = max(mapper_session.repeat_signature_threshold, limits.repeat_signature_threshold)
+            mapper_session.max_consecutive_empty_scrolls = max(mapper_session.max_consecutive_empty_scrolls, limits.max_consecutive_empty_scrolls)
             repository.session.commit()
 
         state = self._load_state(repository, mapper_session.id)
@@ -146,7 +146,7 @@ class UiMapperService(MapperEngine):
             max_depth=target_max_depth,
             max_actions=mapper_session.max_actions,
             max_scrolls=mapper_session.max_scrolls,
-            repeat_signature_threshold=mapper_session.repeat_signature_threshold,
+            max_consecutive_empty_scrolls=mapper_session.max_consecutive_empty_scrolls,
             config_skip_dangerous_actions=config.skip_dangerous_actions,
             package_name=config.package_name,
         )
@@ -208,7 +208,7 @@ class UiMapperService(MapperEngine):
         max_depth: int,
         max_actions: int,
         max_scrolls: int,
-        repeat_signature_threshold: int,
+        max_consecutive_empty_scrolls: int,
         config_skip_dangerous_actions: bool,
         package_name: str,
         ancestor_bounds: list[str] | None = None,
@@ -248,7 +248,7 @@ class UiMapperService(MapperEngine):
                     if node is None or not node.bounds:
                         continue
                     if self.ui.click_bounds(node.bounds):
-                        replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [node.bounds])
+                        replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [node.bounds])
                         self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
                 return screen.id
 
@@ -257,20 +257,110 @@ class UiMapperService(MapperEngine):
             # the brand-new-screen path below, redoing the scroll pass on every resume would be
             # wasteful and isn't needed, the nodes already on file are still valid)
             candidates = self._extract_candidates(nodes, package_name)
-        else:
-            screen = repository.create_screen(
-                session_id=session_id,
-                fingerprint=fingerprint,
-                structural_signature=structural_signature,
-                screen_key=f"screen-{state['screens_recorded'] + 1}",
-                depth=depth,
-                ordinal=state["screens_recorded"],
-                metadata_json={"node_count": len(nodes)},
+            self._process_candidates(
+                repository, session_id, screen, candidates, node_id_by_key,
+                depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth,
+                max_actions=max_actions, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls,
+                config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name,
+                ancestor_bounds=ancestor_bounds,
             )
-            state["screens_recorded"] += 1
-            node_id_by_key: dict[str, int] = {}
-            for index, node in enumerate(nodes):
+            repository.mark_screen_expanded(screen.id)
+            repository.session.commit()
+            return screen.id
+
+        screen = repository.create_screen(
+            session_id=session_id,
+            fingerprint=fingerprint,
+            structural_signature=structural_signature,
+            screen_key=f"screen-{state['screens_recorded'] + 1}",
+            depth=depth,
+            ordinal=state["screens_recorded"],
+            metadata_json={"node_count": len(nodes)},
+        )
+        state["screens_recorded"] += 1
+        node_id_by_key = {}
+        for index, node in enumerate(nodes):
+            key = self._node_key(node, index)
+            persisted = repository.create_node(
+                screen_id=screen.id, node_key=key, text=node.get("text"), content_desc=node.get("content_desc"),
+                resource_id=node.get("resource_id"), class_name=node.get("class_name"), bounds=node.get("bounds"),
+                clickable=bool(node.get("clickable", False)), enabled=bool(node.get("enabled", True)),
+                checkable=bool(node.get("checkable", False)), checked=bool(node.get("checked", False)),
+                focusable=bool(node.get("focusable", False)), scrollable=bool(node.get("scrollable", False)),
+                long_clickable=bool(node.get("long_clickable", False)), package_name=node.get("package_name"),
+            )
+            node_id_by_key[key] = persisted.id
+        # commit as soon as a screen and its nodes exist (issue #25): a crash right after
+        # this point still leaves this screen durable and resumable, not lost with everything
+        # else in one giant uncommitted transaction
+        repository.session.commit()
+        visited_this_pass.add(screen.id)
+
+        if peek_only:
+            # catalogued (screen + nodes already persisted above), never explored further:
+            # opening "Message" reveals a compose screen, that's not an invitation to also
+            # try clicking Send inside it (issue #31)
+            return screen.id
+
+        if repository.has_other_screen_with_structural_signature(session_id, structural_signature, exclude_screen_id=screen.id):
+            # another screen of this same type (e.g. yet another person's profile page) is
+            # already known in this session: recorded for coverage, but not explored again,
+            # this is what stops a profile -> connections -> profile -> connections chain
+            # after the second instance instead of after however deep it happens to go (#30)
+            self.logger.info("Screen %s is another instance of an already-known structural type, not re-exploring it", screen.id)
+            repository.mark_screen_expanded(screen.id)
+            repository.session.commit()
+            return screen.id
+
+        # scroll and interact interleaved (issue #34): try whatever's already known after every
+        # scroll, instead of scrolling all the way first and only then clicking anything. A mixed
+        # feed (posts, ads, suggestions, ...) rarely repeats its exact viewport, so waiting for
+        # that to decide "enough scrolling" (the old approach, #30) usually just burned through
+        # the whole safety ceiling for no reason; stopping as soon as a scroll finds nothing new
+        # is a far more reliable signal, `max_scrolls` stays the hard ceiling behind it either way
+        accumulated_nodes = list(nodes)
+        seen_keys = set(node_id_by_key)
+        current_nodes = nodes
+        consecutive_empty_scrolls = 0
+        screen_scrolls_used = 0
+
+        while True:
+            if depth < max_depth:
+                candidates = self._extract_candidates(accumulated_nodes, package_name)
+                self._process_candidates(
+                    repository, session_id, screen, candidates, node_id_by_key,
+                    depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth,
+                    max_actions=max_actions, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls,
+                    config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name,
+                    ancestor_bounds=ancestor_bounds, replay_known=False,
+                )
+
+            can_scroll = (
+                any(node.get("scrollable") for node in current_nodes)
+                and max_scrolls > 0
+                and screen_scrolls_used < max_scrolls
+                and consecutive_empty_scrolls < max_consecutive_empty_scrolls
+            )
+            if not can_scroll:
+                break
+
+            self.ui.swipe_up()
+            screen_scrolls_used += 1
+            state["scrolls_used"] += 1
+            current_nodes = self.ui.dump_nodes()
+
+            if self._left_target_app(current_nodes, package_name):
+                self._return_to_screen(package_name, ancestor_bounds, departed=True)
+                break
+
+            new_nodes_found = False
+            for index, node in enumerate(current_nodes):
                 key = self._node_key(node, index)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                new_nodes_found = True
+                accumulated_nodes.append(node)
                 persisted = repository.create_node(
                     screen_id=screen.id, node_key=key, text=node.get("text"), content_desc=node.get("content_desc"),
                     resource_id=node.get("resource_id"), class_name=node.get("class_name"), bounds=node.get("bounds"),
@@ -280,39 +370,45 @@ class UiMapperService(MapperEngine):
                     long_clickable=bool(node.get("long_clickable", False)), package_name=node.get("package_name"),
                 )
                 node_id_by_key[key] = persisted.id
-            # commit as soon as a screen and its nodes exist (issue #25): a crash right after
-            # this point still leaves this screen durable and resumable, not lost with everything
-            # else in one giant uncommitted transaction
-            repository.session.commit()
-            visited_this_pass.add(screen.id)
-
-            if peek_only:
-                # catalogued (screen + nodes already persisted above), never explored further:
-                # opening "Message" reveals a compose screen, that's not an invitation to also
-                # try clicking Send inside it (issue #31)
-                return screen.id
-
-            if repository.has_other_screen_with_structural_signature(session_id, structural_signature, exclude_screen_id=screen.id):
-                # another screen of this same type (e.g. yet another person's profile page) is
-                # already known in this session: recorded for coverage, but not explored again,
-                # this is what stops a profile -> connections -> profile -> connections chain
-                # after the second instance instead of after however deep it happens to go (#30)
-                self.logger.info("Screen %s is another instance of an already-known structural type, not re-exploring it", screen.id)
-                repository.mark_screen_expanded(screen.id)
+            if new_nodes_found:
                 repository.session.commit()
-                return screen.id
+                consecutive_empty_scrolls = 0
+            else:
+                consecutive_empty_scrolls += 1
 
-            all_nodes, node_id_by_key = self._scroll_and_catalog(
-                repository, screen, nodes, node_id_by_key,
-                max_scrolls=max_scrolls, repeat_signature_threshold=repeat_signature_threshold,
-                package_name=package_name, ancestor_bounds=ancestor_bounds, state=state,
-            )
+        if depth < max_depth:
+            repository.mark_screen_expanded(screen.id)
+            repository.session.commit()
 
-            if depth >= max_depth:
-                return screen.id
+        return screen.id
 
-            candidates = self._extract_candidates(all_nodes, package_name)
-
+    def _process_candidates(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        screen: Any,
+        candidates: list[MapperActionCandidate],
+        node_id_by_key: dict[str, int],
+        *,
+        depth: int,
+        state: dict[str, int],
+        visited_this_pass: set[int],
+        max_depth: int,
+        max_actions: int,
+        max_consecutive_empty_scrolls: int,
+        config_skip_dangerous_actions: bool,
+        package_name: str,
+        ancestor_bounds: list[str],
+        replay_known: bool = True,
+    ) -> None:
+        """Tries every not-yet-tried candidate: classify, click (or skip if dangerous/no bounds),
+        recurse into whatever it reveals, come back. Shared between a resumed screen (called once
+        with a fixed candidate list, `replay_known=True`: an action already on file might still
+        be worth replaying to reach children that never got explored) and a brand-new one (called
+        again after every scroll, with `candidates` growing each time, `replay_known=False`: an
+        action found again here was tried by this very call moments ago, in an earlier round of
+        the same continuous scroll, its outcome is already fully known and nothing changed about
+        it, so it's always just skipped, never replayed, issue #34)."""
         for candidate in candidates:
             if state["actions_executed"] >= max_actions:
                 break
@@ -320,12 +416,11 @@ class UiMapperService(MapperEngine):
 
             existing_action = repository.find_action_by_key(session_id, screen.id, candidate.action_key)
             if existing_action is not None:
-                # already tried in an earlier pass (e.g. resumed after a crash mid-screen);
-                # don't re-classify/re-record it, just replay it if it's known to lead somewhere
-                existing_node = self._replay_target(repository, existing_action)
-                if existing_node is not None and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
-                    replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
-                    self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
+                if replay_known:
+                    existing_node = self._replay_target(repository, existing_action)
+                    if existing_node is not None and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
+                        replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
+                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
                 continue
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
@@ -364,7 +459,7 @@ class UiMapperService(MapperEngine):
                 # opens a compose screen, it doesn't send one): catalog what it reveals, never
                 # click anything inside it (issue #31)
                 peek = self.safety_service.is_peek_candidate(candidate.node, candidate.label)
-                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds], peek_only=peek)
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds], peek_only=peek)
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
@@ -384,11 +479,6 @@ class UiMapperService(MapperEngine):
             # commit per action (issue #25): whatever already ran is durable before moving on,
             # a crash mid-mapping only ever loses the one action currently in flight
             repository.session.commit()
-
-        repository.mark_screen_expanded(screen.id)
-        repository.session.commit()
-
-        return screen.id
 
     def _left_target_app(self, nodes: list[dict[str, Any]], package_name: str) -> bool:
         # a click (or a scroll) can legitimately leave the target app (share sheet, external
@@ -422,82 +512,6 @@ class UiMapperService(MapperEngine):
         if destination is not None and destination.expanded:
             return None
         return repository.get_node(action.node_id)
-
-    def _scroll_and_catalog(
-        self,
-        repository: SqlAlchemyMapperRepository,
-        screen: Any,
-        initial_nodes: list[dict[str, Any]],
-        node_id_by_key: dict[str, int],
-        *,
-        max_scrolls: int,
-        repeat_signature_threshold: int,
-        package_name: str,
-        ancestor_bounds: list[str],
-        state: dict[str, int],
-    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        """Fully scrolls a screen before any of its candidates are extracted, accumulating every
-        newly revealed node into this same screen instead of spinning off a new screen per
-        scroll position (issue #30): a fixed-content page (a profile) only counts as
-        sufficiently explored once nothing new turns up when scrolling further, not the moment
-        its first viewport has been clicked through. A feed genuinely keeps producing new
-        content on every scroll, so this naturally keeps going for it too, up to the same
-        repeat-signature cutoff as before (#25), just without minting a new `MapperScreen` per
-        scroll along the way.
-
-        `max_scrolls` is a per-screen ceiling, checked against a counter local to this call, not
-        `state["scrolls_used"]` (that one keeps counting for the whole session, only for the
-        final report): a feed-like root screen that happens to need many scrolls to settle
-        (issue #25's own repeat cutoff is content-dependent, it can legitimately take a while)
-        must not eat into every other screen's own scroll budget for the rest of the run, that
-        starved every screen mapped afterward (issue #33)."""
-        accumulated_nodes = list(initial_nodes)
-        seen_keys = set(node_id_by_key)
-        previous_signature = self.fingerprint_service.structural_signature(initial_nodes)
-        consecutive_repeat_count = 0
-        current_nodes = initial_nodes
-        screen_scrolls_used = 0
-
-        while (
-            any(node.get("scrollable") for node in current_nodes)
-            and max_scrolls > 0
-            and screen_scrolls_used < max_scrolls
-            and consecutive_repeat_count < repeat_signature_threshold
-        ):
-            self.ui.swipe_up()
-            screen_scrolls_used += 1
-            state["scrolls_used"] += 1
-            current_nodes = self.ui.dump_nodes()
-
-            if self._left_target_app(current_nodes, package_name):
-                self._return_to_screen(package_name, ancestor_bounds, departed=True)
-                break
-
-            signature = self.fingerprint_service.structural_signature(current_nodes)
-            consecutive_repeat_count = consecutive_repeat_count + 1 if signature == previous_signature else 0
-            previous_signature = signature
-
-            new_nodes = False
-            for index, node in enumerate(current_nodes):
-                key = self._node_key(node, index)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                new_nodes = True
-                accumulated_nodes.append(node)
-                persisted = repository.create_node(
-                    screen_id=screen.id, node_key=key, text=node.get("text"), content_desc=node.get("content_desc"),
-                    resource_id=node.get("resource_id"), class_name=node.get("class_name"), bounds=node.get("bounds"),
-                    clickable=bool(node.get("clickable", False)), enabled=bool(node.get("enabled", True)),
-                    checkable=bool(node.get("checkable", False)), checked=bool(node.get("checked", False)),
-                    focusable=bool(node.get("focusable", False)), scrollable=bool(node.get("scrollable", False)),
-                    long_clickable=bool(node.get("long_clickable", False)), package_name=node.get("package_name"),
-                )
-                node_id_by_key[key] = persisted.id
-            if new_nodes:
-                repository.session.commit()
-
-        return accumulated_nodes, node_id_by_key
 
     BACK_LABELS = {"back", "navigate up", "go back", "up", "close"}
     BACK_RESOURCE_ID_HINTS = ("back_button", "btn_back", "toolbar_back", "nav_back", "back_arrow", ":id/back")
