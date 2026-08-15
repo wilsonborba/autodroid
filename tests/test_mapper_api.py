@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
 from fastapi.testclient import TestClient
 
 from lib.bootstrap import create_api_app
 from lib.dal.local.database import SessionLocal
+from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
-from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperSessionStatus
+from lib.domain.models.mapper_types import MapperActionSafety, MapperFlowFailureType, MapperMode, MapperSessionStatus
 
 
 class FakeMapperEngine:
@@ -164,3 +168,53 @@ def test_latest_mapper_session_endpoint() -> None:
 
     missing = client.get("/mapper/apps/com.unknown.testapp/latest-session")
     assert missing.status_code == 404
+
+
+def _fake_settings(*, enabled: bool, threshold: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(mapper_auto_remap_enabled=enabled, mapper_auto_remap_threshold=threshold, timezone=ZoneInfo("UTC"))
+
+
+def test_remap_candidates_endpoint_returns_empty_when_disabled(monkeypatch) -> None:
+    monkeypatch.setattr("lib.presentation.api.routes.mapper.get_settings", lambda: _fake_settings(enabled=False))
+    client = TestClient(create_api_app())
+
+    response = client.get("/mapper/apps/remap-candidates")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_remap_candidates_endpoint_returns_candidates_when_enabled(monkeypatch) -> None:
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperFlowRepository(session)
+        for _ in range(3):
+            repository.record_failure(package_name="com.apicandidate.testapp", failure_type=MapperFlowFailureType.CLICK_FAILED)
+        session.commit()
+
+    monkeypatch.setattr("lib.presentation.api.routes.mapper.get_settings", lambda: _fake_settings(enabled=True))
+    client = TestClient(create_api_app())
+
+    response = client.get("/mapper/apps/remap-candidates")
+
+    assert response.status_code == 200
+    names = [candidate["package_name"] for candidate in response.json()]
+    assert "com.apicandidate.testapp" in names
+
+
+def test_remap_apps_endpoint_queues_jobs_for_selected_packages() -> None:
+    client = TestClient(create_api_app())
+
+    response = client.post("/mapper/apps/remap", json={"package_names": ["com.remap1.testapp", "com.remap2.testapp"], "strategy": "override"})
+
+    assert response.status_code == 200
+    queued = response.json()["queued"]
+    assert len(queued) == 2
+    assert {item["package_name"] for item in queued} == {"com.remap1.testapp", "com.remap2.testapp"}
+
+
+def test_remap_apps_endpoint_requires_a_selection() -> None:
+    client = TestClient(create_api_app())
+
+    response = client.post("/mapper/apps/remap", json={})
+
+    assert response.status_code == 400

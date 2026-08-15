@@ -11,6 +11,7 @@ from lib.domain.adapters.linkedin.tasks.extract_profile_task import ExtractLinke
 from lib.domain.services.automation_service import AutomationRegistryService
 from lib.domain.services.dispatcher_service import DispatcherService
 from lib.domain.services.local_mapper_export_service import LocalMapperExportService
+from lib.domain.services.mapper_remap_task import MapperRemapTask
 from lib.presentation.api.routes.jobs import router as jobs_router
 from lib.presentation.api.routes.mapper import router as mapper_router
 from lib.presentation.api.routes.mapper_flows import router as mapper_flows_router
@@ -31,6 +32,8 @@ def get_registry() -> AutomationRegistryService:
     registry = AutomationRegistryService()
     linkedin_task = ExtractLinkedInProfileTask(settings)
     registry.register("linkedin.extract_profile_basic", linkedin_task.run)
+    remap_task = MapperRemapTask(settings)
+    registry.register("mapper.remap", remap_task.run)
     return registry
 
 

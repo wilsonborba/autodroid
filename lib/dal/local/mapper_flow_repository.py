@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep, MapperFlowStepUsage
-from lib.domain.models.mapper_types import MapperActionSafety
+from lib.core.utils.clock import utc_now
+from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowFailure, MapperFlowStep, MapperFlowStepUsage
+from lib.domain.models.mapper_types import MapperActionSafety, MapperFlowFailureType
 
 
 class SqlAlchemyMapperFlowRepository:
@@ -199,3 +200,49 @@ class SqlAlchemyMapperFlowRepository:
         for usage in self.session.scalars(stmt):
             usage.ordinal += 1
         self.session.flush()
+
+    # --- Interaction failures (issue #21) -------------------------------------
+
+    def record_failure(
+        self,
+        *,
+        package_name: str,
+        failure_type: MapperFlowFailureType,
+        flow_id: int | None = None,
+        step_id: int | None = None,
+        detail: str | None = None,
+    ) -> MapperFlowFailure:
+        failure = MapperFlowFailure(
+            package_name=package_name,
+            failure_type=failure_type,
+            flow_id=flow_id,
+            step_id=step_id,
+            detail=detail,
+        )
+        self.session.add(failure)
+        self.session.flush()
+        return failure
+
+    def list_remap_candidates(self, threshold: int) -> list[tuple[str, int]]:
+        """Packages with at least `threshold` unresolved interaction failures, most failures
+        first. A candidate is computed on demand from this query, not tracked in its own table
+        (issue #21: avoid duplicating state)."""
+        stmt = (
+            select(MapperFlowFailure.package_name, func.count(MapperFlowFailure.id))
+            .where(MapperFlowFailure.resolved_at.is_(None))
+            .group_by(MapperFlowFailure.package_name)
+            .having(func.count(MapperFlowFailure.id) >= threshold)
+            .order_by(func.count(MapperFlowFailure.id).desc())
+        )
+        return [(package_name, count) for package_name, count in self.session.execute(stmt).all()]
+
+    def resolve_failures_for_package(self, package_name: str) -> int:
+        """Marks every unresolved failure for a package as resolved (soft, kept for audit),
+        called after a successful remap so old failures stop counting toward future thresholds."""
+        stmt = select(MapperFlowFailure).where(MapperFlowFailure.package_name == package_name, MapperFlowFailure.resolved_at.is_(None))
+        failures = self.session.scalars(stmt).all()
+        now = utc_now()
+        for failure in failures:
+            failure.resolved_at = now
+        self.session.flush()
+        return len(failures)

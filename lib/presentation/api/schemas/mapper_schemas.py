@@ -188,3 +188,26 @@ class MapperFlowRunResponse(BaseModel):
     name: str
     package_name: str
     steps: list[MapperFlowStepResultResponse]
+
+
+# --- Remap candidates and triggering (issue #21) ------------------------------
+
+class MapperRemapCandidateResponse(BaseModel):
+    package_name: str
+    unresolved_failure_count: int
+
+
+class MapperRemapRequest(BaseModel):
+    package_names: list[str] | None = None
+    all: bool = False
+    strategy: str = "override"
+    mode: str = "medium"
+
+
+class MapperRemapJobResponse(BaseModel):
+    package_name: str
+    job_id: int
+
+
+class MapperRemapResponse(BaseModel):
+    queued: list[MapperRemapJobResponse]
