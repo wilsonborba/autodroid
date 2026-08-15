@@ -197,6 +197,72 @@ class UiMapperService(MapperEngine):
             "reused": True,
         }
 
+    def remap_screen(self, session_id: int, screen_id: int) -> dict[str, Any]:
+        with session_scope() as session:
+            repository = SqlAlchemyMapperRepository(session)
+            mapper_session = repository.get_session(session_id)
+            if mapper_session is None:
+                raise LookupError(f"Mapper session {session_id} not found")
+            screen = repository.get_screen(screen_id)
+            if screen is None:
+                raise LookupError(f"Mapper screen {screen_id} not found")
+            if screen.session_id != session_id:
+                raise ValueError(f"Mapper screen {screen_id} does not belong to session {session_id}")
+
+            from lib.domain.services.mapper_flow_service import MapperFlowService
+
+            limits = self.mode_service.get_limits(mapper_session.mode)
+            package_name = mapper_session.package_name
+            _root_screen_id, ancestor_steps = MapperFlowService(session).resolve_restart_plan(package_name, screen_id)
+
+            self.navigation_context.prepare_fresh_app_launch(package_name)
+            for step in ancestor_steps:
+                if step.action_type != "click":
+                    raise ValueError(f"Unsupported restart step action_type: {step.action_type}")
+                candidates = step.selector_json.get("candidates") if step.selector_json else None
+                if not candidates:
+                    raise ValueError(f"Restart step {step.id} has no text candidates")
+                if not self.ui.click_first_by_text_or_description(*candidates):
+                    raise ValueError(f"Failed to replay restart step {step.id} to reach screen {screen_id}")
+
+            repository.reset_screen_expanded(screen_id)
+            mapper_session.status = MapperSessionStatus.RUNNING
+            session.commit()
+
+            baseline = self._load_state(repository, session_id)
+            state = baseline.copy()
+            visited_this_pass: set[int] = set()
+            self._explore(
+                repository,
+                session_id,
+                depth=screen.depth,
+                state=state,
+                visited_this_pass=visited_this_pass,
+                max_depth=max(mapper_session.max_depth, limits.max_depth),
+                max_actions=mapper_session.max_actions,
+                max_scrolls=mapper_session.max_scrolls,
+                max_consecutive_empty_scrolls=mapper_session.max_consecutive_empty_scrolls,
+                config_skip_dangerous_actions=mapper_session.skip_dangerous_actions,
+                package_name=package_name,
+            )
+
+            mapper_session.status = MapperSessionStatus.COMPLETED
+            mapper_session.finished_at = utc_now()
+            mapper_session.explored_up_to_depth = max(mapper_session.explored_up_to_depth, screen.depth)
+            session.commit()
+
+            return {
+                "session_id": mapper_session.id,
+                "screen_id": screen.id,
+                "package_name": mapper_session.package_name,
+                "mode": mapper_session.mode.value,
+                "screens_recorded": state["screens_recorded"] - baseline["screens_recorded"],
+                "actions_executed": state["actions_executed"] - baseline["actions_executed"],
+                "scrolls_used": state["scrolls_used"] - baseline["scrolls_used"],
+                "revisited_screens": state["revisited_screens"] - baseline["revisited_screens"],
+                "status": mapper_session.status.value,
+            }
+
     def _explore(
         self,
         repository: SqlAlchemyMapperRepository,
@@ -254,21 +320,18 @@ class UiMapperService(MapperEngine):
                         self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
                 return screen.id
 
-            # resumed mid-screen (crash, or a session continued in a deeper mode): candidates
-            # come from whatever was already captured, no re-scroll here (issue #30 only changes
-            # the brand-new-screen path below, redoing the scroll pass on every resume would be
-            # wasteful and isn't needed, the nodes already on file are still valid)
-            candidates = self._extract_candidates(nodes, package_name)
-            self.logger.debug("Resuming mid-screen %s: %s candidate(s) extracted from what was already captured", screen.id, len(candidates))
-            self._process_candidates(
-                repository, session_id, screen, candidates, node_id_by_key,
+            # resumed mid-screen (crash, a session continued in a deeper mode, or a forced
+            # remap, issue #41): a pre-existing successful action might still be worth
+            # replaying to reach a still-unexplored child (replay_known=True), and this also
+            # scrolls for potentially new content exactly like a brand-new screen would, not
+            # just whatever was captured before this pass started
+            self._scroll_and_interact(
+                repository, session_id, screen, nodes, node_id_by_key,
                 depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth,
-                max_actions=max_actions, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls,
+                max_actions=max_actions, max_scrolls=max_scrolls, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls,
                 config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name,
-                ancestor_bounds=ancestor_bounds,
+                ancestor_bounds=ancestor_bounds, replay_known=True,
             )
-            repository.mark_screen_expanded(screen.id)
-            repository.session.commit()
             return screen.id
 
         screen = repository.create_screen(
@@ -322,6 +385,39 @@ class UiMapperService(MapperEngine):
         # that to decide "enough scrolling" (the old approach, #30) usually just burned through
         # the whole safety ceiling for no reason; stopping as soon as a scroll finds nothing new
         # is a far more reliable signal, `max_scrolls` stays the hard ceiling behind it either way
+        self._scroll_and_interact(
+            repository, session_id, screen, nodes, node_id_by_key,
+            depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth,
+            max_actions=max_actions, max_scrolls=max_scrolls, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls,
+            config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name,
+            ancestor_bounds=ancestor_bounds, replay_known=False,
+        )
+
+        return screen.id
+
+    def _scroll_and_interact(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        screen: Any,
+        nodes: list[dict[str, Any]],
+        node_id_by_key: dict[str, int],
+        *,
+        depth: int,
+        state: dict[str, int],
+        visited_this_pass: set[int],
+        max_depth: int,
+        max_actions: int,
+        max_scrolls: int,
+        max_consecutive_empty_scrolls: int,
+        config_skip_dangerous_actions: bool,
+        package_name: str,
+        ancestor_bounds: list[str],
+        replay_known: bool,
+    ) -> None:
+        """Shared by a brand-new screen and an existing-but-not-yet-expanded one (crash resume,
+        a deeper complement, or a forced remap, issue #41): scroll and interact interleaved,
+        candidates tried right after every scroll instead of only once scrolling is done."""
         accumulated_nodes = list(nodes)
         seen_keys = set(node_id_by_key)
         current_nodes = nodes
@@ -337,7 +433,7 @@ class UiMapperService(MapperEngine):
                     depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth,
                     max_actions=max_actions, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls,
                     config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name,
-                    ancestor_bounds=ancestor_bounds, replay_known=False,
+                    ancestor_bounds=ancestor_bounds, replay_known=replay_known,
                 )
 
             can_scroll = (
@@ -394,8 +490,6 @@ class UiMapperService(MapperEngine):
         if depth < max_depth:
             repository.mark_screen_expanded(screen.id)
             repository.session.commit()
-
-        return screen.id
 
     def _process_candidates(
         self,

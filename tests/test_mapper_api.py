@@ -25,6 +25,19 @@ class FakeMapperEngine:
             "status": "completed",
         }
 
+    def remap_screen(self, session_id: int, screen_id: int):
+        return {
+            "session_id": session_id,
+            "screen_id": screen_id,
+            "package_name": "com.linkedin.android",
+            "mode": "light",
+            "screens_recorded": 0,
+            "actions_executed": 1,
+            "scrolls_used": 0,
+            "revisited_screens": 1,
+            "status": "completed",
+        }
+
 
 def test_mapper_run_endpoint(monkeypatch) -> None:
     monkeypatch.setattr('lib.presentation.api.routes.mapper.get_mapper_engine', lambda: FakeMapperEngine())
@@ -216,5 +229,43 @@ def test_remap_apps_endpoint_requires_a_selection() -> None:
     client = TestClient(create_api_app())
 
     response = client.post("/mapper/apps/remap", json={})
+
+    assert response.status_code == 400
+
+
+def test_mapper_screen_remap_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr('lib.presentation.api.routes.mapper.get_mapper_engine', lambda: FakeMapperEngine())
+    client = TestClient(create_api_app())
+
+    response = client.post('/mapper/sessions/42/screens/7/remap')
+
+    assert response.status_code == 200
+    assert response.json()['session_id'] == 42
+    assert response.json()['screen_id'] == 7
+    assert response.json()['actions_executed'] == 1
+
+
+def test_mapper_screen_remap_endpoint_returns_404(monkeypatch) -> None:
+    class MissingMapperEngine(FakeMapperEngine):
+        def remap_screen(self, session_id: int, screen_id: int):
+            raise LookupError(f"Mapper screen {screen_id} not found")
+
+    monkeypatch.setattr('lib.presentation.api.routes.mapper.get_mapper_engine', lambda: MissingMapperEngine())
+    client = TestClient(create_api_app())
+
+    response = client.post('/mapper/sessions/42/screens/7/remap')
+
+    assert response.status_code == 404
+
+
+def test_mapper_screen_remap_endpoint_returns_400(monkeypatch) -> None:
+    class InvalidMapperEngine(FakeMapperEngine):
+        def remap_screen(self, session_id: int, screen_id: int):
+            raise ValueError(f"Mapper screen {screen_id} does not belong to session {session_id}")
+
+    monkeypatch.setattr('lib.presentation.api.routes.mapper.get_mapper_engine', lambda: InvalidMapperEngine())
+    client = TestClient(create_api_app())
+
+    response = client.post('/mapper/sessions/42/screens/7/remap')
 
     assert response.status_code == 400

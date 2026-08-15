@@ -19,6 +19,7 @@ from lib.presentation.api.schemas.mapper_schemas import (
     MapperRemapResponse,
     MapperRunRequest,
     MapperRunResponse,
+    MapperScreenRemapResponse,
     MapperScreenResponse,
     MapperSessionResponse,
     MapperTransitionResponse,
@@ -77,6 +78,21 @@ def show_mapper_session(session_id: int):
         if mapper_session is None:
             raise HTTPException(status_code=404, detail="Mapper session not found")
         return MapperSessionResponse.model_validate(mapper_session, from_attributes=True)
+
+
+@router.post(
+    "/sessions/{session_id}/screens/{screen_id}/remap", response_model=MapperScreenRemapResponse, summary="Remap one specific screen inline",
+    description="Replays the path from the app root to a previously mapped screen, forces that screen's `expanded` flag back to false, and re-explores it inline so new candidates below it are captured immediately (issue #41).",
+)
+def remap_mapper_screen(session_id: int, screen_id: int):
+    logger.info("POST /mapper/sessions/%s/screens/%s/remap", session_id, screen_id)
+    try:
+        result = get_mapper_engine().remap_screen(session_id, screen_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return MapperScreenRemapResponse(**result)
 
 
 @router.post(
