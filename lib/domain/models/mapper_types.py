@@ -35,3 +35,4 @@ class MapperRunConfig:
     package_name: str
     mode: MapperMode
     skip_dangerous_actions: bool = True
+    override: bool = False

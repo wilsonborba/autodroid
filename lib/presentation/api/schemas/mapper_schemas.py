@@ -9,6 +9,7 @@ class MapperRunRequest(BaseModel):
     package_name: str
     mode: str = "light"
     skip_dangerous_actions: bool = True
+    override: bool = False
 
 
 class MapperRunResponse(BaseModel):
@@ -20,6 +21,7 @@ class MapperRunResponse(BaseModel):
     scrolls_used: int
     revisited_screens: int
     status: str
+    reused: bool = False
 
 
 class MapperSessionResponse(BaseModel):

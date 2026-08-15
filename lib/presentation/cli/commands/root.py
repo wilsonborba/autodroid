@@ -169,12 +169,17 @@ def serve_api(host: str = "127.0.0.1", port: int = 8000) -> None:
 
 
 @mapper_app.command("run")
-def run_mapper(package_name: str, mode: str = "light", skip_dangerous_actions: bool = True) -> None:
+def run_mapper(
+    package_name: str,
+    mode: str = "light",
+    skip_dangerous_actions: bool = True,
+    override: bool = typer.Option(False, "--override", help="Force remapping even if a completed session already exists"),
+) -> None:
     try:
         mapper_mode = MapperMode(mode)
     except ValueError as exc:
         raise typer.BadParameter(f"Invalid mapper mode: {mode}") from exc
-    result = UiMapperService(get_settings()).run(MapperRunConfig(package_name=package_name, mode=mapper_mode, skip_dangerous_actions=skip_dangerous_actions))
+    result = UiMapperService(get_settings()).run(MapperRunConfig(package_name=package_name, mode=mapper_mode, skip_dangerous_actions=skip_dangerous_actions, override=override))
     typer.echo(JsonOutput.render(result))
 
 

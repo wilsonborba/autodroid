@@ -24,6 +24,7 @@ def run_mapper(payload: MapperRunRequest):
             package_name=payload.package_name,
             mode=mode,
             skip_dangerous_actions=payload.skip_dangerous_actions,
+            override=payload.override,
         )
     )
     return MapperRunResponse(**result)

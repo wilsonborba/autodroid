@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from lib.dal.local.database import SessionLocal
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
-from lib.domain.models.mapper_types import MapperActionSafety, MapperMode
+from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperSessionStatus
 
 
 def test_mapper_repository_creates_session_and_screen() -> None:
@@ -42,3 +42,40 @@ def test_mapper_repository_creates_session_and_screen() -> None:
         assert loaded.package_name == "com.linkedin.android"
         assert len(loaded.screens) == 1
         assert len(loaded.actions) == 1
+
+
+def test_get_latest_session_returns_most_recent_completed_session() -> None:
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        older = repository.create_session(
+            package_name="com.example.app",
+            mode=MapperMode.LIGHT,
+            skip_dangerous_actions=True,
+            max_depth=1,
+            max_actions=8,
+            max_scrolls=0,
+        )
+        older.status = MapperSessionStatus.COMPLETED
+        newer = repository.create_session(
+            package_name="com.example.app",
+            mode=MapperMode.LIGHT,
+            skip_dangerous_actions=True,
+            max_depth=1,
+            max_actions=8,
+            max_scrolls=0,
+        )
+        newer.status = MapperSessionStatus.COMPLETED
+        session.commit()
+        newer_id = newer.id
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        latest = repository.get_latest_session("com.example.app", status=MapperSessionStatus.COMPLETED)
+        assert latest is not None
+        assert latest.id == newer_id
+
+
+def test_get_latest_session_returns_none_when_no_session_exists() -> None:
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        assert repository.get_latest_session("com.unknown.app") is None
