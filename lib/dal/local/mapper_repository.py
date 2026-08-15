@@ -188,6 +188,12 @@ class SqlAlchemyMapperRepository:
         )
         return self.session.scalar(stmt)
 
+    def find_transition_by_action(self, action_id: int) -> MapperTransition | None:
+        """The transition produced by a given action, used to know where a step is expected to
+        leave the device (issue #24: `MapperFlowStep.source_action_id` -> this -> `to_screen_id`)."""
+        stmt = select(MapperTransition).where(MapperTransition.action_id == action_id).order_by(MapperTransition.id).limit(1)
+        return self.session.scalar(stmt)
+
     def get_action(self, action_id: int) -> MapperAction | None:
         return self.session.get(MapperAction, action_id)
 

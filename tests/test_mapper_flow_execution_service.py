@@ -3,8 +3,12 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from lib.dal.local.database import SessionLocal
+from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
+from lib.dal.local.mapper_route_repository import SqlAlchemyMapperRoutePerformanceRepository
 from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowFailure, MapperFlowStep
+from lib.domain.models.mapper_types import MapperActionSafety, MapperMode
 from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
+from lib.domain.services.mapper_route_planner_service import RestartOption
 
 
 def _failures_for(package_name: str) -> list[MapperFlowFailure]:
@@ -20,6 +24,8 @@ class FakeUi:
         self.contains_result = True
         self.swipes = 0
         self.screenshots: list[str] = []
+        self.clicked_bounds: list[str] = []
+        self.click_bounds_result = True
         # dumps are consumed one per call; once exhausted, the last one repeats (simulates the
         # screen "settling" once there's no more new content to scroll into)
         self.dump_sequence = list(dump_sequence) if dump_sequence else [[{"text": "hello"}]]
@@ -44,6 +50,10 @@ class FakeUi:
         self.screenshots.append(str(path))
         return path
 
+    def click_bounds(self, bounds: str) -> bool:
+        self.clicked_bounds.append(bounds)
+        return self.click_bounds_result
+
 
 class FakeAdb:
     def __init__(self) -> None:
@@ -51,6 +61,14 @@ class FakeAdb:
 
     def press_back(self) -> None:
         self.back_calls += 1
+
+
+class FakeNav:
+    def __init__(self) -> None:
+        self.prepared: list[str] = []
+
+    def prepare_fresh_app_launch(self, package_name: str) -> None:
+        self.prepared.append(package_name)
 
 
 class FakeOcr:
@@ -74,6 +92,7 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
     service.settings = type("Settings", (), {"output_dir": __import__("pathlib").Path("/tmp/autodroid-flow-tests"), "timezone": settings.timezone})()
     service.ui = FakeUi(dump_sequence)
     service.adb = FakeAdb()
+    service.navigation_context = FakeNav()
     service.ocr = FakeOcr()
     service.safety_service = MapperSafetyService()
     service.fingerprint_service = MapperFingerprintService()
@@ -316,3 +335,67 @@ def test_dangerous_action_blocked_does_not_record_a_failure() -> None:
     service.run_step(step)
 
     assert _failures_for("com.failure4.testapp") == []
+
+
+def test_navigate_returns_immediately_when_already_at_target_screen() -> None:
+    service = build_service()
+
+    result = service.navigate(
+        package_name="com.samescreen.testapp", session_id=1, current_screen_id=5, target_screen_id=5,
+        restart_option=RestartOption(root_screen_id=5, ancestor_step_ids=[]), restart_steps=[],
+    )
+
+    assert result["strategy_type"] == "already_there"
+    assert result["success"] is True
+
+
+def test_navigate_walks_direct_path_and_records_route_performance() -> None:
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.navigate.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=3, max_actions=20, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root", screen_key="root", depth=0, ordinal=0)
+        target = repository.create_screen(session_id=mapper_session.id, fingerprint="target", screen_key="target", depth=1, ordinal=1)
+        node = repository.create_node(screen_id=root.id, node_key="node", text="Go", clickable=True, bounds="[0,0][10,10]")
+        action = repository.create_action(session_id=mapper_session.id, screen_id=root.id, node_id=node.id, action_key="click:go", action_type="click", label="Go", safety=MapperActionSafety.SAFE)
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=root.id, action_id=action.id, to_screen_id=target.id, result_type="clicked")
+        session.commit()
+        session_id, root_id, target_id = mapper_session.id, root.id, target.id
+
+    service = build_service()
+    result = service.navigate(
+        package_name="com.navigate.testapp", session_id=session_id, current_screen_id=root_id, target_screen_id=target_id,
+        restart_option=RestartOption(root_screen_id=root_id, ancestor_step_ids=[]), restart_steps=[],
+    )
+
+    assert result["strategy_type"] == "direct_path"
+    assert result["success"] is True
+    assert service.ui.clicked_bounds == ["[0,0][10,10]"]
+    assert service.navigation_context.prepared == []  # direct path never needed a restart
+
+    with SessionLocal() as session:
+        perf_repository = SqlAlchemyMapperRoutePerformanceRepository(session)
+        perf = perf_repository.get_route_performance(result["route_signature"])
+        assert perf is not None
+        assert perf.sample_count == 1
+
+        transitions = SqlAlchemyMapperRepository(session).list_transitions(session_id)
+        transition_perf = perf_repository.get_transition_performance(transitions[0].id)
+        assert transition_perf is not None
+        assert transition_perf.sample_count == 1
+        assert transition_perf.success_count == 1
+
+
+def test_navigate_restarts_and_replays_ancestor_steps_when_no_direct_path_exists() -> None:
+    service = build_service()
+    ancestor_step = make_step(id=501, action_type="click", selector_json={"candidates": ["Home"]})
+
+    result = service.navigate(
+        package_name="com.norestartpath.testapp", session_id=999999, current_screen_id=1, target_screen_id=2,
+        restart_option=RestartOption(root_screen_id=1, ancestor_step_ids=[ancestor_step.id]),
+        restart_steps=[ancestor_step],
+    )
+
+    assert result["strategy_type"] == "restart"
+    assert result["success"] is True
+    assert service.navigation_context.prepared == ["com.norestartpath.testapp"]
+    assert service.ui.clicked_exact == [("Home",)]
