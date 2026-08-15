@@ -133,7 +133,10 @@ def test_click_that_leaves_the_target_app_is_not_recorded_as_a_screen() -> None:
 
     assert result["screens_recorded"] == 1  # only the root; the foreign screen was never recorded
     assert result["actions_executed"] == 1  # the click still happened, it still used the budget
-    assert service.adb.back_calls == 1  # still backed out after leaving
+    # recovery relaunches the app instead of a plain back press (issue #28): a plain back from an
+    # unknown foreign screen isn't reliable, relaunching guarantees a known state (the root)
+    assert service.navigation_context.prepared == ["com.target.testapp", "com.target.testapp"]
+    assert service.adb.back_calls == 0
 
     with SessionLocal() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -154,6 +157,19 @@ def test_candidates_from_other_packages_are_never_attempted() -> None:
     assert result["actions_executed"] == 1
     assert service.ui.clicks == ["[0,0][10,10]"]  # the systemui clock was never clicked
     assert result["screens_recorded"] == 2
+
+
+def test_leaving_the_app_from_a_deep_screen_relaunches_and_replays_the_way_back() -> None:
+    root = [{"text": "Open Section", "content_desc": "", "resource_id": "open_section", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+    mid = [{"text": "Share", "content_desc": "", "resource_id": "share_btn", "class_name": "TextView", "bounds": "[0,20][10,30]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+    foreign = [{"text": "Share via", "content_desc": "", "resource_id": "chooser", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.android.systemui"}]
+    service = build_service([root, mid, foreign])
+
+    service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
+
+    # open_section, then share (which leaves the app), then open_section again to walk back to mid
+    assert service.ui.clicks == ["[0,0][10,10]", "[0,20][10,30]", "[0,0][10,10]"]
+    assert service.navigation_context.prepared == ["com.target.testapp", "com.target.testapp"]
 
 
 def test_click_that_stays_in_the_target_app_is_recorded_normally() -> None:
