@@ -147,6 +147,7 @@ class UiMapperService(MapperEngine):
             max_scrolls=mapper_session.max_scrolls,
             repeat_signature_threshold=mapper_session.repeat_signature_threshold,
             config_skip_dangerous_actions=config.skip_dangerous_actions,
+            package_name=config.package_name,
         )
 
         mapper_session.status = MapperSessionStatus.COMPLETED
@@ -208,10 +209,25 @@ class UiMapperService(MapperEngine):
         max_scrolls: int,
         repeat_signature_threshold: int,
         config_skip_dangerous_actions: bool,
+        package_name: str,
         previous_scroll_signature: str | None = None,
         consecutive_repeat_count: int = 0,
     ) -> int | None:
         nodes = self.ui.dump_nodes()
+
+        # a click can legitimately leave the target app (share sheet, external link, sign-in
+        # with Google, file picker, ...): none of that is "dangerous" by MapperSafetyService's
+        # keyword check, so it's caught here instead. Only trust this when at least one node
+        # actually reports a package (uiautomator dumps normally do), otherwise there's nothing
+        # to compare and exploration proceeds as before (issue #27).
+        observed_packages = {node.get("package_name") for node in nodes if node.get("package_name")}
+        if observed_packages and package_name not in observed_packages:
+            self.logger.warning(
+                "Mapper left %s (observed %s instead), backing off without recording this screen",
+                package_name, sorted(observed_packages),
+            )
+            return None
+
         fingerprint = self.fingerprint_service.fingerprint(nodes)
         structural_signature = self.fingerprint_service.structural_signature(nodes)
         if previous_scroll_signature is not None and structural_signature == previous_scroll_signature:
@@ -280,7 +296,7 @@ class UiMapperService(MapperEngine):
                 if node is None or not node.bounds:
                     continue
                 if self.ui.click_bounds(node.bounds):
-                    self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                    self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
                     self.adb.press_back()
             return screen.id
 
@@ -297,7 +313,7 @@ class UiMapperService(MapperEngine):
                 if existing_action.executed and existing_action.success and existing_action.node_id:
                     existing_node = repository.get_node(existing_action.node_id)
                     if existing_node and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
-                        self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                        self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
                         self.adb.press_back()
                 continue
 
@@ -333,13 +349,13 @@ class UiMapperService(MapperEngine):
             action.success = success
             state["actions_executed"] += 1
             if success:
-                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
                     action_id=action.id,
                     to_screen_id=to_screen_id,
-                    result_type="clicked",
+                    result_type="clicked" if to_screen_id is not None else "left_app",
                 )
                 self.adb.press_back()
             else:
@@ -365,7 +381,7 @@ class UiMapperService(MapperEngine):
                 repository, session_id, depth=depth, state=state, visited_this_pass=visited_this_pass,
                 max_depth=max_depth, max_actions=max_actions, max_scrolls=max_scrolls,
                 repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions,
-                previous_scroll_signature=structural_signature, consecutive_repeat_count=consecutive_repeat_count,
+                package_name=package_name, previous_scroll_signature=structural_signature, consecutive_repeat_count=consecutive_repeat_count,
             )
 
         return screen.id

@@ -16,10 +16,14 @@ ROOT_NODES = [{"text": "Profile", "content_desc": "", "resource_id": "profile_bt
 LEAF_NODES = [{"text": "Details", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True}]
 DANGEROUS_ROOT_NODES = [{"text": "Delete account", "content_desc": "", "resource_id": "delete_account", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True}]
 
+IN_APP_ROOT = [{"text": "Profile", "content_desc": "", "resource_id": "profile_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+IN_APP_LEAF = [{"text": "Details", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
+FOREIGN_APP_SCREEN = [{"text": "Share via", "content_desc": "", "resource_id": "chooser_item", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.android.systemui"}]
+
 _TEST_PACKAGE_NAMES = (
     "com.fresh.testapp", "com.dangerous.testapp", "com.reuse.testapp", "com.override.testapp",
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
-    "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp",
+    "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
 )
 
 
@@ -116,6 +120,37 @@ def test_dangerous_action_is_blocked_by_default() -> None:
         actions = repository.list_actions(result["session_id"])
         assert len(actions) == 1
         assert actions[0].skipped_reason == "dangerous_action_blocked"
+
+
+def test_click_that_leaves_the_target_app_is_not_recorded_as_a_screen() -> None:
+    service = build_service([IN_APP_ROOT, FOREIGN_APP_SCREEN])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    assert result["screens_recorded"] == 1  # only the root; the foreign screen was never recorded
+    assert result["actions_executed"] == 1  # the click still happened, it still used the budget
+    assert service.adb.back_calls == 1  # still backed out after leaving
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        transitions = repository.list_transitions(result["session_id"])
+        assert len(transitions) == 1
+        assert transitions[0].result_type == "left_app"
+        assert transitions[0].to_screen_id is None
+
+
+def test_click_that_stays_in_the_target_app_is_recorded_normally() -> None:
+    service = build_service([IN_APP_ROOT, IN_APP_LEAF])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    assert result["screens_recorded"] == 2
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        transitions = repository.list_transitions(result["session_id"])
+        assert transitions[0].result_type == "clicked"
+        assert transitions[0].to_screen_id is not None
 
 
 def test_second_run_reuses_completed_session_by_default() -> None:
