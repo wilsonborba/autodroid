@@ -109,3 +109,47 @@ class SqlAlchemyMapperRepository:
         screen.visit_count += 1
         self.session.flush()
         return screen
+
+    def list_screens(self, session_id: int) -> list[MapperScreen]:
+        stmt = (
+            select(MapperScreen)
+            .where(MapperScreen.session_id == session_id)
+            .options(selectinload(MapperScreen.nodes))
+            .order_by(MapperScreen.ordinal)
+        )
+        return list(self.session.scalars(stmt))
+
+    def get_screen(self, screen_id: int) -> MapperScreen | None:
+        stmt = select(MapperScreen).where(MapperScreen.id == screen_id).options(selectinload(MapperScreen.nodes))
+        return self.session.scalar(stmt)
+
+    def list_actions(
+        self,
+        session_id: int,
+        *,
+        screen_id: int | None = None,
+        safety: MapperActionSafety | None = None,
+        executed: bool | None = None,
+    ) -> list[MapperAction]:
+        stmt = select(MapperAction).where(MapperAction.session_id == session_id)
+        if screen_id is not None:
+            stmt = stmt.where(MapperAction.screen_id == screen_id)
+        if safety is not None:
+            stmt = stmt.where(MapperAction.safety == safety)
+        if executed is not None:
+            stmt = stmt.where(MapperAction.executed == executed)
+        stmt = stmt.order_by(MapperAction.id)
+        return list(self.session.scalars(stmt))
+
+    def list_transitions(self, session_id: int) -> list[MapperTransition]:
+        stmt = select(MapperTransition).where(MapperTransition.session_id == session_id).order_by(MapperTransition.id)
+        return list(self.session.scalars(stmt))
+
+    def get_transition(self, transition_id: int) -> MapperTransition | None:
+        return self.session.get(MapperTransition, transition_id)
+
+    def get_action(self, action_id: int) -> MapperAction | None:
+        return self.session.get(MapperAction, action_id)
+
+    def get_node(self, node_id: int) -> MapperNode | None:
+        return self.session.get(MapperNode, node_id)

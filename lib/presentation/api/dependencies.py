@@ -26,3 +26,10 @@ from lib.domain.services.local_mapper_export_service import LocalMapperExportSer
 
 def get_mapper_export_service() -> LocalMapperExportService:
     return LocalMapperExportService()
+
+
+from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
+
+
+def get_mapper_flow_execution_service() -> MapperFlowExecutionService:
+    return MapperFlowExecutionService(_settings)

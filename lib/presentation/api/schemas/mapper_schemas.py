@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -41,3 +42,139 @@ class MapperSessionResponse(BaseModel):
 class MapperExportResponse(BaseModel):
     session_id: int
     export_path: str
+
+
+# --- A) live graph query -----------------------------------------------------
+
+class MapperNodeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    node_key: str
+    text: str | None
+    content_desc: str | None
+    resource_id: str | None
+    class_name: str | None
+    bounds: str | None
+    clickable: bool
+    enabled: bool
+    scrollable: bool
+
+
+class MapperScreenResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    screen_key: str
+    fingerprint: str
+    depth: int
+    ordinal: int
+    visit_count: int
+    node_count: int = 0
+    nodes: list[MapperNodeResponse] | None = None
+
+
+class MapperActionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    screen_id: int
+    node_id: int | None
+    action_key: str
+    action_type: str
+    label: str | None
+    safety: str
+    skipped_reason: str | None
+    executed: bool
+    success: bool | None
+
+
+class MapperTransitionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    from_screen_id: int
+    action_id: int
+    to_screen_id: int | None
+    result_type: str
+
+
+class MapperGraphResponse(BaseModel):
+    session_id: int
+    package_name: str
+    screens: list[MapperScreenResponse]
+    transitions: list[MapperTransitionResponse]
+
+
+# --- B) MapperFlow -----------------------------------------------------------
+
+class MapperFlowStepResponse(BaseModel):
+    id: int
+    ordinal: int
+    action_type: str
+    selector: dict[str, Any]
+    safety: str
+    source_screen_id: int | None
+    source_action_id: int | None
+    params: dict[str, Any] | None
+
+
+class MapperFlowSummaryResponse(BaseModel):
+    id: int
+    name: str
+    package_name: str
+    description: str | None
+    source_session_id: int | None
+    created_at: datetime
+    step_count: int
+
+
+class MapperFlowResponse(MapperFlowSummaryResponse):
+    steps: list[MapperFlowStepResponse]
+
+
+class MapperFlowStepCreateRequest(BaseModel):
+    action_type: str
+    selector: dict[str, Any] = {}
+    params: dict[str, Any] | None = None
+    source_screen_id: int | None = None
+    source_action_id: int | None = None
+    ordinal: int | None = None
+
+
+class MapperFlowCreateRequest(BaseModel):
+    name: str
+    package_name: str
+    description: str | None = None
+    source_session_id: int | None = None
+    transition_ids: list[int] | None = None
+    steps: list[MapperFlowStepCreateRequest] | None = None
+
+
+class MapperFlowUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class MapperFlowStepUpdateRequest(BaseModel):
+    action_type: str | None = None
+    selector: dict[str, Any] | None = None
+    params: dict[str, Any] | None = None
+
+
+class MapperFlowStepResultResponse(BaseModel):
+    ordinal: int
+    action_type: str
+    success: bool
+    skipped_reason: str | None = None
+    error: str | None = None
+    node_count: int | None = None
+    screenshot_path: str | None = None
+    ocr_lines: list[str] | None = None
+
+
+class MapperFlowRunResponse(BaseModel):
+    flow_id: int
+    name: str
+    package_name: str
+    steps: list[MapperFlowStepResultResponse]

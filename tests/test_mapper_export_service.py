@@ -25,8 +25,9 @@ def test_mapper_export_service_writes_index_and_screen_files(tmp_path: Path) -> 
         repository.create_transition(session_id=mapper_session.id, from_screen_id=screen.id, action_id=action.id, to_screen_id=None, result_type="clicked")
         session.commit()
         session_id = mapper_session.id
+        screen_id = screen.id
 
     export_dir = LocalMapperExportService().export_session(session_id, tmp_path)
 
     assert (export_dir / "index.json").exists()
-    assert (export_dir / "screens" / "screen_1.json").exists()
+    assert (export_dir / "screens" / f"screen_{screen_id}.json").exists()
