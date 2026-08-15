@@ -11,6 +11,7 @@ class MapperRunRequest(BaseModel):
     mode: str = "light"
     skip_dangerous_actions: bool = True
     override: bool = False
+    complement: bool = False
 
 
 class MapperRunResponse(BaseModel):
@@ -23,6 +24,7 @@ class MapperRunResponse(BaseModel):
     revisited_screens: int
     status: str
     reused: bool = False
+    complemented: bool = False
 
 
 class MapperSessionResponse(BaseModel):
