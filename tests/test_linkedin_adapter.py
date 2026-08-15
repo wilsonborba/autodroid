@@ -59,6 +59,9 @@ class FakeFlowRepository:
     def get_flow_by_name(self, package_name: str, name: str):
         return self.existing_flow
 
+    def ordered_steps(self, flow):
+        return flow.steps
+
 
 class FakeFlowService:
     def __init__(self, session) -> None:
@@ -66,7 +69,7 @@ class FakeFlowService:
 
     def create_flow(self, **kwargs):
         step_definition = kwargs["steps"][0]
-        step = SimpleNamespace(id=1, ordinal=0, action_type=step_definition["action_type"], selector_json=step_definition["selector"], params_json=None)
+        step = SimpleNamespace(id=1, action_type=step_definition["action_type"], selector_json=step_definition["selector"], params_json=None)
         return SimpleNamespace(id=1, name=kwargs["name"], package_name=kwargs["package_name"], steps=[step])
 
 

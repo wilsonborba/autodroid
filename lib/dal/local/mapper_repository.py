@@ -176,6 +176,18 @@ class SqlAlchemyMapperRepository:
     def get_transition(self, transition_id: int) -> MapperTransition | None:
         return self.session.get(MapperTransition, transition_id)
 
+    def find_transition_to_screen(self, to_screen_id: int) -> MapperTransition | None:
+        """The transition that leads into a given screen, used to walk the map backwards
+        (issue #23, ancestor-chain resolution). If more than one transition reaches the same
+        screen, the earliest recorded one is used, deterministic but otherwise arbitrary."""
+        stmt = (
+            select(MapperTransition)
+            .where(MapperTransition.to_screen_id == to_screen_id, MapperTransition.result_type == "clicked")
+            .order_by(MapperTransition.id)
+            .limit(1)
+        )
+        return self.session.scalar(stmt)
+
     def get_action(self, action_id: int) -> MapperAction | None:
         return self.session.get(MapperAction, action_id)
 

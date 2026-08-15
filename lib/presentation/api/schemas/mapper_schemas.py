@@ -112,7 +112,7 @@ class MapperGraphResponse(BaseModel):
 
 class MapperFlowStepResponse(BaseModel):
     id: int
-    ordinal: int
+    ordinal: int | None = None  # position within a specific flow; None when the step is shown outside that context (e.g. add-step ancestors)
     action_type: str
     selector: dict[str, Any]
     safety: str
@@ -136,12 +136,18 @@ class MapperFlowResponse(MapperFlowSummaryResponse):
 
 
 class MapperFlowStepCreateRequest(BaseModel):
-    action_type: str
+    step_id: int | None = None  # reuse an existing (shared) step as-is; other fields are ignored when set
+    action_type: str | None = None
     selector: dict[str, Any] = {}
     params: dict[str, Any] | None = None
     source_screen_id: int | None = None
     source_action_id: int | None = None
     ordinal: int | None = None
+
+
+class MapperFlowAddStepResponse(BaseModel):
+    step: MapperFlowStepResponse
+    ancestors: list[MapperFlowStepResponse]
 
 
 class MapperFlowCreateRequest(BaseModel):
@@ -165,7 +171,7 @@ class MapperFlowStepUpdateRequest(BaseModel):
 
 
 class MapperFlowStepResultResponse(BaseModel):
-    ordinal: int
+    step_id: int
     action_type: str
     success: bool
     skipped_reason: str | None = None

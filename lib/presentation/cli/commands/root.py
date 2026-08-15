@@ -9,6 +9,7 @@ from alembic.config import Config
 
 from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
 from lib.core.logs import LogTarget, configure_logging
+from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
 from lib.domain.services.job_queue_service import JobQueueService
@@ -343,25 +344,27 @@ def _flow_summary_payload(flow) -> dict:
         "package_name": flow.package_name,
         "description": flow.description,
         "source_session_id": flow.source_session_id,
-        "step_count": len(flow.steps),
+        "step_count": len(flow.step_usages),
+    }
+
+
+def _step_payload(step, *, ordinal: int | None = None) -> dict:
+    return {
+        "id": step.id,
+        "ordinal": ordinal,
+        "action_type": step.action_type,
+        "selector": step.selector_json,
+        "safety": step.safety.value,
+        "source_screen_id": step.source_screen_id,
+        "source_action_id": step.source_action_id,
+        "params": step.params_json,
     }
 
 
 def _flow_payload(flow) -> dict:
     payload = _flow_summary_payload(flow)
-    payload["steps"] = [
-        {
-            "id": step.id,
-            "ordinal": step.ordinal,
-            "action_type": step.action_type,
-            "selector": step.selector_json,
-            "safety": step.safety.value,
-            "source_screen_id": step.source_screen_id,
-            "source_action_id": step.source_action_id,
-            "params": step.params_json,
-        }
-        for step in sorted(flow.steps, key=lambda item: item.ordinal)
-    ]
+    usages = sorted(flow.step_usages, key=lambda usage: usage.ordinal)
+    payload["steps"] = [_step_payload(usage.step, ordinal=usage.ordinal) for usage in usages]
     return payload
 
 
@@ -399,7 +402,7 @@ def list_flows(package: str | None = typer.Option(None, "--package"), as_json: b
             typer.echo(JsonOutput.render({"flows": [_flow_summary_payload(flow) for flow in flows]}))
             return
         for flow in flows:
-            typer.echo(f"#{flow.id} {flow.name} [{flow.package_name}] steps={len(flow.steps)}")
+            typer.echo(f"#{flow.id} {flow.name} [{flow.package_name}] steps={len(flow.step_usages)}")
 
 
 @flow_app.command("show")
@@ -434,18 +437,20 @@ def delete_flow(flow_id: int) -> None:
 @flow_app.command("add-step")
 def add_step(
     flow_id: int,
-    action_type: str,
+    action_type: str | None = None,
     selector: str = "{}",
     params: str | None = None,
     source_screen_id: int | None = None,
     source_action_id: int | None = None,
     ordinal: int | None = None,
+    step_id: int | None = typer.Option(None, "--step-id", help="Reuse an existing (shared) step instead of defining a new one"),
 ) -> None:
     with get_session() as session:
         try:
-            step = MapperFlowService(session).add_step(
+            outcome = MapperFlowService(session).add_step(
                 flow_id,
                 {
+                    "step_id": step_id,
                     "action_type": action_type,
                     "selector": json.loads(selector),
                     "params": json.loads(params) if params else None,
@@ -456,14 +461,18 @@ def add_step(
             )
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
-        typer.echo(JsonOutput.render({"id": step.id, "ordinal": step.ordinal, "action_type": step.action_type}))
+        typer.echo(JsonOutput.render({
+            "step": _step_payload(outcome["step"]),
+            "ancestors": [_step_payload(step) for step in outcome["ancestors"]],
+        }))
 
 
 @flow_app.command("remove-step")
 def remove_step(flow_id: int, step_id: int) -> None:
+    """Removes the step from this flow only; the step definition (and its use by other flows) stays."""
     with get_session() as session:
         try:
-            MapperFlowService(session).delete_step(step_id)
+            MapperFlowService(session).remove_step(flow_id, step_id)
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
         typer.echo(f"Removed step {step_id} from flow {flow_id}")
@@ -475,7 +484,8 @@ def run_flow(flow_id: int, skip_dangerous_actions: bool = True) -> None:
         flow = MapperFlowService(session).get_flow(flow_id)
         if flow is None:
             raise typer.Exit(code=1)
-        result = MapperFlowExecutionService(get_settings()).run_flow(flow, skip_dangerous_actions=skip_dangerous_actions)
+        steps = SqlAlchemyMapperFlowRepository(session).ordered_steps(flow)
+        result = MapperFlowExecutionService(get_settings()).run_flow(flow, steps, skip_dangerous_actions=skip_dangerous_actions)
     typer.echo(JsonOutput.render(result))
 
 
@@ -485,8 +495,8 @@ def run_flow_step(flow_id: int, ordinal: int, skip_dangerous_actions: bool = Tru
         flow = MapperFlowService(session).get_flow(flow_id)
         if flow is None:
             raise typer.Exit(code=1)
-        step = next((candidate for candidate in flow.steps if candidate.ordinal == ordinal), None)
-        if step is None:
+        usage = next((candidate for candidate in flow.step_usages if candidate.ordinal == ordinal), None)
+        if usage is None:
             raise typer.Exit(code=1)
-        result = MapperFlowExecutionService(get_settings()).run_step(step, skip_dangerous_actions=skip_dangerous_actions)
+        result = MapperFlowExecutionService(get_settings()).run_step(usage.step, skip_dangerous_actions=skip_dangerous_actions)
     typer.echo(JsonOutput.render(result))

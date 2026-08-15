@@ -38,9 +38,12 @@ class MapperFlowExecutionService:
             "ocr_extract": self._execute_ocr_extract,
         }
 
-    def run_flow(self, flow: MapperFlow, *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
-        self.logger.info("Running flow %s (%s) with %s steps", flow.id, flow.name, len(flow.steps))
-        results = [self.run_step(step, skip_dangerous_actions=skip_dangerous_actions) for step in flow.steps]
+    def run_flow(self, flow: MapperFlow, steps: list[MapperFlowStep], *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
+        """`steps` is the ordered list of this flow's steps (a reusable step can belong to
+        several flows, so ordering/membership is resolved by the caller via
+        `SqlAlchemyMapperFlowRepository.ordered_steps`, not derived from `flow` itself)."""
+        self.logger.info("Running flow %s (%s) with %s steps", flow.id, flow.name, len(steps))
+        results = [self.run_step(step, skip_dangerous_actions=skip_dangerous_actions) for step in steps]
         self.logger.info("Finished flow %s (%s)", flow.id, flow.name)
         return {
             "flow_id": flow.id,
@@ -50,26 +53,28 @@ class MapperFlowExecutionService:
         }
 
     def run_step(self, step: MapperFlowStep, *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
+        # steps are shared/reusable (issue #23), they no longer carry a flow-specific position,
+        # so results are identified by step_id (globally stable) instead of a per-flow ordinal
         label = self._describe_step(step)
         safety = self.safety_service.classify({"text": label, "content_desc": label, "resource_id": ""}, label)
 
         if safety == MapperActionSafety.DANGEROUS and skip_dangerous_actions:
-            self.logger.warning("Blocked dangerous flow step %s (%s: %r)", step.ordinal, step.action_type, label)
-            return {"ordinal": step.ordinal, "action_type": step.action_type, "success": False, "skipped_reason": "dangerous_action_blocked"}
+            self.logger.warning("Blocked dangerous flow step %s (%s: %r)", step.id, step.action_type, label)
+            return {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": "dangerous_action_blocked"}
 
         handler = self._handlers.get(step.action_type)
         if handler is None:
             self.logger.error("Unsupported flow step action_type: %s", step.action_type)
-            return {"ordinal": step.ordinal, "action_type": step.action_type, "success": False, "skipped_reason": "unsupported_action_type"}
+            return {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": "unsupported_action_type"}
 
         try:
             outcome = handler(step)
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller as a failed step, not raised
-            self.logger.error("Flow step %s (%s) failed: %s", step.ordinal, step.action_type, exc)
-            return {"ordinal": step.ordinal, "action_type": step.action_type, "success": False, "skipped_reason": None, "error": str(exc)}
+            self.logger.error("Flow step %s (%s) failed: %s", step.id, step.action_type, exc)
+            return {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": None, "error": str(exc)}
 
-        self.logger.info("Executed flow step %s (%s) success=%s", step.ordinal, step.action_type, outcome.get("success"))
-        return {"ordinal": step.ordinal, "action_type": step.action_type, "skipped_reason": None, **outcome}
+        self.logger.info("Executed flow step %s (%s) success=%s", step.id, step.action_type, outcome.get("success"))
+        return {"step_id": step.id, "action_type": step.action_type, "skipped_reason": None, **outcome}
 
     def _describe_step(self, step: MapperFlowStep) -> str:
         selector = step.selector_json or {}
@@ -117,12 +122,12 @@ class MapperFlowExecutionService:
         return {"success": True, "node_count": len(nodes), "nodes": nodes}
 
     def _execute_screenshot(self, step: MapperFlowStep) -> dict[str, Any]:
-        filename = (step.params_json or {}).get("filename") or f"flow_{step.flow_id}.png"
+        filename = (step.params_json or {}).get("filename") or f"flow_step_{step.id}.png"
         path = self.ui.screenshot(self.settings.output_dir / "screenshots" / filename)
         return {"success": True, "screenshot_path": str(path)}
 
     def _execute_ocr_extract(self, step: MapperFlowStep) -> dict[str, Any]:
-        filename = (step.params_json or {}).get("filename") or f"flow_{step.flow_id}.png"
+        filename = (step.params_json or {}).get("filename") or f"flow_step_{step.id}.png"
         path = self.settings.output_dir / "screenshots" / filename
         lines = self.ocr.extract_lines(path)
         return {"success": True, "ocr_lines": lines}

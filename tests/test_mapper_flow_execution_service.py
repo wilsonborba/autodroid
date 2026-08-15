@@ -74,7 +74,12 @@ def build_service() -> MapperFlowExecutionService:
 
 
 def make_step(**kwargs) -> MapperFlowStep:
-    step = MapperFlowStep(flow_id=1, ordinal=kwargs.pop("ordinal", 0), action_type=kwargs.pop("action_type"), selector_json=kwargs.pop("selector_json", {}), params_json=kwargs.pop("params_json", None))
+    step = MapperFlowStep(
+        package_name=kwargs.pop("package_name", "com.test.testapp"),
+        action_type=kwargs.pop("action_type"),
+        selector_json=kwargs.pop("selector_json", {}),
+        params_json=kwargs.pop("params_json", None),
+    )
     step.id = kwargs.pop("id", 1)
     return step
 
@@ -168,15 +173,15 @@ def test_unsupported_action_type_reports_failure_without_raising() -> None:
 def test_run_flow_executes_all_steps_in_order() -> None:
     service = build_service()
     flow = MapperFlow(id=1, name="extract_profile", package_name="com.linkedin.android")
-    flow.steps = [
-        make_step(ordinal=0, action_type="click", selector_json={"candidates": ["Profile"]}),
-        make_step(ordinal=1, action_type="scroll_up"),
-        make_step(ordinal=2, action_type="dump_nodes"),
+    steps = [
+        make_step(id=10, action_type="click", selector_json={"candidates": ["Profile"]}),
+        make_step(id=11, action_type="scroll_up"),
+        make_step(id=12, action_type="dump_nodes"),
     ]
 
-    result = service.run_flow(flow)
+    result = service.run_flow(flow, steps)
 
     assert result["flow_id"] == 1
-    assert [step["ordinal"] for step in result["steps"]] == [0, 1, 2]
+    assert [step["step_id"] for step in result["steps"]] == [10, 11, 12]
     assert all(step["success"] for step in result["steps"])
     assert service.ui.swipes == 1
