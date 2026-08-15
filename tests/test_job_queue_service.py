@@ -10,6 +10,15 @@ from lib.domain.services.job_queue_service import JobQueueService
 
 
 def reset_db() -> None:
+    # this drops and recreates every table, real production data included, if AUTODROID_DATABASE_URL
+    # isn't pointed at an isolated test database (issue #29's exact category of mistake, it
+    # happened again from this specific fixture: refuse instead of guessing)
+    db_url = str(engine.url)
+    if "var/autodroid.db" in db_url or "test" not in db_url.lower():
+        raise RuntimeError(
+            f"reset_db() refuses to run against {db_url!r}: it looks like the real database, "
+            "not an isolated test one. Set AUTODROID_DATABASE_URL to a test database first."
+        )
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
