@@ -19,6 +19,10 @@ DANGEROUS_ROOT_NODES = [{"text": "Delete account", "content_desc": "", "resource
 IN_APP_ROOT = [{"text": "Profile", "content_desc": "", "resource_id": "profile_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
 IN_APP_LEAF = [{"text": "Details", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
 FOREIGN_APP_SCREEN = [{"text": "Share via", "content_desc": "", "resource_id": "chooser_item", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.android.systemui"}]
+MIXED_PACKAGE_ROOT = [
+    {"text": "Search jobs", "content_desc": "", "resource_id": "search_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"},
+    {"text": "Clock", "content_desc": "", "resource_id": "clock", "class_name": "TextView", "bounds": "[90,0][100,10]", "clickable": True, "enabled": True, "package_name": "com.android.systemui"},
+]
 
 _TEST_PACKAGE_NAMES = (
     "com.fresh.testapp", "com.dangerous.testapp", "com.reuse.testapp", "com.override.testapp",
@@ -137,6 +141,19 @@ def test_click_that_leaves_the_target_app_is_not_recorded_as_a_screen() -> None:
         assert len(transitions) == 1
         assert transitions[0].result_type == "left_app"
         assert transitions[0].to_screen_id is None
+
+
+def test_candidates_from_other_packages_are_never_attempted() -> None:
+    # a dump also carries status bar / nav bar / launcher-edge nodes, each with their own
+    # package_name; clicking those would waste the action budget before ever trying the app's
+    # own buttons, so they should never even become candidates in the first place
+    service = build_service([MIXED_PACKAGE_ROOT, IN_APP_LEAF])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    assert result["actions_executed"] == 1
+    assert service.ui.clicks == ["[0,0][10,10]"]  # the systemui clock was never clicked
+    assert result["screens_recorded"] == 2
 
 
 def test_click_that_stays_in_the_target_app_is_recorded_normally() -> None:
@@ -328,3 +345,33 @@ def test_override_and_complement_together_raises() -> None:
     service = build_service([])
     with pytest.raises(ValueError):
         service.run(MapperRunConfig(package_name="com.invalid.testapp", mode=MapperMode.LIGHT, override=True, complement=True))
+
+
+def test_navigate_back_prefers_an_in_app_back_button_over_system_back() -> None:
+    screen_with_back_button = [{"text": "", "content_desc": "Back", "resource_id": "toolbar_back_button", "class_name": "ImageButton", "bounds": "[0,0][5,5]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+    service = build_service([screen_with_back_button])
+
+    service._navigate_back("com.target.testapp")
+
+    assert service.ui.clicks == ["[0,0][5,5]"]
+    assert service.adb.back_calls == 0
+
+
+def test_navigate_back_falls_back_to_system_back_without_an_in_app_button() -> None:
+    screen_without_back_button = [{"text": "Some content", "content_desc": "", "resource_id": "content", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
+    service = build_service([screen_without_back_button])
+
+    service._navigate_back("com.target.testapp")
+
+    assert service.ui.clicks == []
+    assert service.adb.back_calls == 1
+
+
+def test_navigate_back_ignores_a_back_looking_button_from_another_package() -> None:
+    foreign_back_button = [{"text": "", "content_desc": "Back", "resource_id": "back_button", "class_name": "ImageButton", "bounds": "[0,0][5,5]", "clickable": True, "enabled": True, "package_name": "com.android.systemui"}]
+    service = build_service([foreign_back_button])
+
+    service._navigate_back("com.target.testapp")
+
+    assert service.ui.clicks == []  # not trusted, could take us further from the target app
+    assert service.adb.back_calls == 1

@@ -297,10 +297,10 @@ class UiMapperService(MapperEngine):
                     continue
                 if self.ui.click_bounds(node.bounds):
                     self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
-                    self.adb.press_back()
+                    self._navigate_back(package_name)
             return screen.id
 
-        candidates = self._extract_candidates(nodes)
+        candidates = self._extract_candidates(nodes, package_name)
         for index, candidate in enumerate(candidates):
             if state["actions_executed"] >= max_actions:
                 break
@@ -314,7 +314,7 @@ class UiMapperService(MapperEngine):
                     existing_node = repository.get_node(existing_action.node_id)
                     if existing_node and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
                         self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name)
-                        self.adb.press_back()
+                        self._navigate_back(package_name)
                 continue
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
@@ -357,7 +357,7 @@ class UiMapperService(MapperEngine):
                     to_screen_id=to_screen_id,
                     result_type="clicked" if to_screen_id is not None else "left_app",
                 )
-                self.adb.press_back()
+                self._navigate_back(package_name)
             else:
                 repository.create_transition(
                     session_id=session_id,
@@ -386,13 +386,50 @@ class UiMapperService(MapperEngine):
 
         return screen.id
 
-    def _extract_candidates(self, nodes: list[dict[str, Any]]) -> list[MapperActionCandidate]:
+    BACK_LABELS = {"back", "navigate up", "go back", "up", "close"}
+    BACK_RESOURCE_ID_HINTS = ("back_button", "btn_back", "toolbar_back", "nav_back", "back_arrow", ":id/back")
+
+    def _find_back_affordance(self, nodes: list[dict[str, Any]], package_name: str) -> dict[str, Any] | None:
+        for node in nodes:
+            if not node.get("clickable") or not node.get("bounds"):
+                continue
+            node_package = node.get("package_name")
+            if node_package is not None and node_package != package_name:
+                continue
+            label = str(node.get("content_desc") or node.get("text") or "").strip().lower()
+            resource_id = str(node.get("resource_id") or "").lower()
+            if label in self.BACK_LABELS or any(hint in resource_id for hint in self.BACK_RESOURCE_ID_HINTS):
+                return node
+        return None
+
+    def _navigate_back(self, package_name: str) -> None:
+        """The system back button is context-dependent and not always safe during exploration:
+        pressed from the app's own root it can exit to the home screen or a previous app instead
+        of just closing the current screen, silently taking the Mapper out of the target app.
+        An in-app back/up/close affordance, when the current screen has one, does what we
+        actually mean ("undo this last navigation") without that risk; the system back button is
+        only used when no such affordance is found."""
+        nodes = self.ui.dump_nodes()
+        back_node = self._find_back_affordance(nodes, package_name)
+        if back_node is not None:
+            self.ui.click_bounds(back_node["bounds"])
+        else:
+            self.adb.press_back()
+
+    def _extract_candidates(self, nodes: list[dict[str, Any]], package_name: str) -> list[MapperActionCandidate]:
         candidates: list[MapperActionCandidate] = []
         for index, node in enumerate(nodes):
             label = str(node.get("text") or node.get("content_desc") or "").strip() or None
             if not node.get("clickable"):
                 continue
             if not label and not node.get("resource_id"):
+                continue
+            # a dump includes whatever else is on screen too (status bar, nav bar, launcher
+            # edges), each carrying its own package_name: clicking those wastes the action
+            # budget and leaves the app before ever trying the target app's own buttons (issue
+            # #27). Unset package_name is allowed through (unknown, not necessarily foreign).
+            node_package = node.get("package_name")
+            if node_package is not None and node_package != package_name:
                 continue
             candidates.append(
                 MapperActionCandidate(
