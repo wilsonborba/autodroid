@@ -28,7 +28,16 @@ router = APIRouter(prefix="/mapper", tags=["mapper"])
 logger = get_logger(__name__)
 
 
-@router.post("/run", response_model=MapperRunResponse)
+@router.post(
+    "/run", response_model=MapperRunResponse, summary="Map an app's UI structure",
+    description="Explores the app (screens, clickable elements, transitions between them), "
+    "structural only, never per-user content: two people's profile pages are recorded as one "
+    "type, not one entry each (issue #30). `mode` is `light` (broad, shallow overview), `medium` "
+    "(a few levels deep), or `deep` (maps everything, stops once nothing new turns up). Calling "
+    "this again for an already-mapped package reuses the existing session unless `override` "
+    "(remap from scratch) or `complement` (go deeper without redoing what's known) is set; "
+    "those two are mutually exclusive. This call blocks until mapping finishes.",
+)
 def run_mapper(payload: MapperRunRequest):
     logger.info("POST /mapper/run package=%s mode=%s", payload.package_name, payload.mode)
     if payload.override and payload.complement:
@@ -52,7 +61,7 @@ def run_mapper(payload: MapperRunRequest):
     return MapperRunResponse(**result)
 
 
-@router.get("/sessions", response_model=list[MapperSessionResponse])
+@router.get("/sessions", response_model=list[MapperSessionResponse], summary="List mapper sessions, newest first")
 def list_mapper_sessions(limit: int = 50):
     with get_session() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -60,7 +69,7 @@ def list_mapper_sessions(limit: int = 50):
         return [MapperSessionResponse.model_validate(item, from_attributes=True) for item in sessions]
 
 
-@router.get("/sessions/{session_id}", response_model=MapperSessionResponse)
+@router.get("/sessions/{session_id}", response_model=MapperSessionResponse, summary="Get one mapper session")
 def show_mapper_session(session_id: int):
     with get_session() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -70,14 +79,23 @@ def show_mapper_session(session_id: int):
         return MapperSessionResponse.model_validate(mapper_session, from_attributes=True)
 
 
-@router.post("/sessions/{session_id}/export", response_model=MapperExportResponse)
+@router.post(
+    "/sessions/{session_id}/export", response_model=MapperExportResponse, summary="Export a session's map as local JSON files",
+    description="Writes the session's screens/actions/transitions to disk as a structured, "
+    "human-readable JSON export (issue #15), for inspection or archival outside the database.",
+)
 def export_mapper_session(session_id: int):
     logger.info("POST /mapper/sessions/%s/export", session_id)
     export_path = get_mapper_export_service().export_session(session_id, get_settings().output_dir / "mappers")
     return MapperExportResponse(session_id=session_id, export_path=str(export_path))
 
 
-@router.get("/sessions/{session_id}/screens", response_model=list[MapperScreenResponse])
+@router.get(
+    "/sessions/{session_id}/screens", response_model=list[MapperScreenResponse], summary="List screens discovered in a session",
+    description="One entry per structurally distinct screen type found (not per visit, and not "
+    "per person/data instance for pages like a profile, see issue #30). Use "
+    "`GET .../screens/{screen_id}` for a single screen's full node list.",
+)
 def list_mapper_screens(session_id: int):
     with get_session() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -96,7 +114,12 @@ def list_mapper_screens(session_id: int):
         ]
 
 
-@router.get("/sessions/{session_id}/screens/{screen_id}", response_model=MapperScreenResponse)
+@router.get(
+    "/sessions/{session_id}/screens/{screen_id}", response_model=MapperScreenResponse, summary="Get one screen with its full node list",
+    description="Includes every node captured on that screen (text, content_desc, resource_id, "
+    "class_name, bounds, clickable/scrollable/... flags), the same shape `dump_nodes` returns "
+    "live via `/device/actions`, but from what was recorded while mapping.",
+)
 def show_mapper_screen(session_id: int, screen_id: int):
     with get_session() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -115,7 +138,12 @@ def show_mapper_screen(session_id: int, screen_id: int):
         )
 
 
-@router.get("/sessions/{session_id}/actions", response_model=list[MapperActionResponse])
+@router.get(
+    "/sessions/{session_id}/actions", response_model=list[MapperActionResponse], summary="List actions discovered in a session",
+    description="Every clickable candidate the mapper found, filterable by `screen_id`, `safety` "
+    "(`safe`|`dangerous`, dangerous ones are blocked by default while mapping), and `executed`. "
+    "An action's `id` is what `/device/actions` takes as `target_action_id` to fire it on demand.",
+)
 def list_mapper_actions(session_id: int, screen_id: int | None = None, safety: str | None = None, executed: bool | None = None):
     safety_filter = None
     if safety is not None:
@@ -143,7 +171,12 @@ def list_mapper_actions(session_id: int, screen_id: int | None = None, safety: s
         ]
 
 
-@router.get("/sessions/{session_id}/transitions", response_model=list[MapperTransitionResponse])
+@router.get(
+    "/sessions/{session_id}/transitions", response_model=list[MapperTransitionResponse], summary="List transitions (edges) discovered in a session",
+    description="One entry per action tried: `to_screen_id` is set only when it actually led "
+    "somewhere new (`result_type=\"clicked\"`); a null `to_screen_id` means it failed, was "
+    "blocked as dangerous, or left the app entirely (`result_type` says which).",
+)
 def list_mapper_transitions(session_id: int):
     with get_session() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -151,7 +184,11 @@ def list_mapper_transitions(session_id: int):
         return [MapperTransitionResponse.model_validate(transition, from_attributes=True) for transition in transitions]
 
 
-@router.get("/sessions/{session_id}/graph", response_model=MapperGraphResponse)
+@router.get(
+    "/sessions/{session_id}/graph", response_model=MapperGraphResponse, summary="Get the whole session as one graph",
+    description="Every screen and every transition in a single response, for a caller that "
+    "wants the full picture at once instead of paging through the separate endpoints.",
+)
 def show_mapper_graph(session_id: int):
     with get_session() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -177,7 +214,12 @@ def show_mapper_graph(session_id: int):
         )
 
 
-@router.get("/apps/{package_name}/latest-session", response_model=MapperSessionResponse)
+@router.get(
+    "/apps/{package_name}/latest-session", response_model=MapperSessionResponse, summary="Get an app's most recent completed map",
+    description="404 if the package was never fully mapped. Its `id` is what `source_session_id` "
+    "takes when creating a MapperFlow, and what `/device/actions`' `current_screen_id`/"
+    "`target_screen_id` values belong to.",
+)
 def get_latest_mapper_session(package_name: str):
     with get_session() as session:
         repository = SqlAlchemyMapperRepository(session)
@@ -187,7 +229,14 @@ def get_latest_mapper_session(package_name: str):
         return MapperSessionResponse.model_validate(mapper_session, from_attributes=True)
 
 
-@router.get("/apps/remap-candidates", response_model=list[MapperRemapCandidateResponse])
+@router.get(
+    "/apps/remap-candidates", response_model=list[MapperRemapCandidateResponse], summary="List apps whose map looks stale",
+    description="Packages with enough recorded interaction failures (a selector that stopped "
+    "matching, a click that stopped working) to suggest the app's real UI drifted from what was "
+    "mapped (issue #21). Opt-in: returns empty unless auto-remap is enabled in settings, failures "
+    "still accumulate in the background either way. `threshold` overrides the configured minimum "
+    "failure count for this call only.",
+)
 def list_remap_candidates(threshold: int | None = None):
     settings = get_settings()
     if not settings.mapper_auto_remap_enabled:
@@ -201,7 +250,14 @@ def list_remap_candidates(threshold: int | None = None):
         return [MapperRemapCandidateResponse(package_name=package_name, unresolved_failure_count=count) for package_name, count in candidates]
 
 
-@router.post("/apps/remap", response_model=MapperRemapResponse)
+@router.post(
+    "/apps/remap", response_model=MapperRemapResponse, summary="Queue a remap job for one or more apps",
+    description="Queues background jobs (doesn't run inline, doesn't block): `package_names` "
+    "picks specific apps, or `all=true` remaps every current remap candidate. `strategy` is "
+    "`override` (remap from scratch) or `complement` (extend the existing map deeper without "
+    "redoing what's known); `mode` is the same `light`/`medium`/`deep` as `POST /mapper/run`. "
+    "Queuing this also resolves the failures that made those packages candidates in the first place.",
+)
 def remap_apps(payload: MapperRemapRequest):
     logger.info("POST /mapper/apps/remap package_names=%s all=%s strategy=%s", payload.package_names, payload.all, payload.strategy)
     settings = get_settings()

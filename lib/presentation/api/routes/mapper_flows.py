@@ -20,7 +20,13 @@ from lib.presentation.api.schemas.mapper_schemas import (
     MapperFlowUpdateRequest,
 )
 
-router = APIRouter(prefix="/mapper/flows", tags=["mapper-flows"])
+router = APIRouter(
+    prefix="/mapper/flows",
+    tags=["mapper-flows"],
+    # a Flow is a named, pre-composed sequence of steps against an already-mapped app: use this
+    # group for a fixed job that always does the same thing. For one-off, decided-as-you-go
+    # actions, use /device/actions instead, no Flow needs to be saved beforehand.
+)
 logger = get_logger(__name__)
 
 
@@ -63,14 +69,23 @@ def _flow_to_summary(flow: MapperFlow) -> MapperFlowSummaryResponse:
     )
 
 
-@router.get("", response_model=list[MapperFlowSummaryResponse])
+@router.get("", response_model=list[MapperFlowSummaryResponse], summary="List saved flows, optionally by package")
 def list_flows(package_name: str | None = None):
     with get_session() as session:
         flows = MapperFlowService(session).list_flows(package_name)
         return [_flow_to_summary(flow) for flow in flows]
 
 
-@router.post("", response_model=MapperFlowResponse)
+@router.post(
+    "", response_model=MapperFlowResponse, summary="Create a named, saved flow",
+    description="Requires either `steps` (inline definitions, each `{action_type, selector, "
+    "params}`, `source_screen_id`/`source_action_id` optional provenance) or `transition_ids` "
+    "(build the flow directly from mapped transitions instead). Adding a step whose "
+    "`source_screen_id` isn't reachable from an already-included step auto-pulls the ancestor "
+    "chain needed to get there (issue #23), so the flow is always runnable end to end. Steps are "
+    "shared, package-scoped objects (`POST /mapper/flows/{id}/steps` with an existing `step_id` "
+    "reuses one instead of duplicating it, editing a shared step affects every flow using it).",
+)
 def create_flow(payload: MapperFlowCreateRequest):
     logger.info("POST /mapper/flows name=%s package=%s", payload.name, payload.package_name)
     steps = [step.model_dump() for step in payload.steps] if payload.steps else None
@@ -89,7 +104,7 @@ def create_flow(payload: MapperFlowCreateRequest):
         return _flow_to_response(flow)
 
 
-@router.get("/{flow_id}", response_model=MapperFlowResponse)
+@router.get("/{flow_id}", response_model=MapperFlowResponse, summary="Get one flow with its ordered steps")
 def show_flow(flow_id: int):
     with get_session() as session:
         flow = MapperFlowService(session).get_flow(flow_id)
@@ -98,7 +113,7 @@ def show_flow(flow_id: int):
         return _flow_to_response(flow)
 
 
-@router.patch("/{flow_id}", response_model=MapperFlowResponse)
+@router.patch("/{flow_id}", response_model=MapperFlowResponse, summary="Rename or redescribe a flow")
 def update_flow(flow_id: int, payload: MapperFlowUpdateRequest):
     logger.info("PATCH /mapper/flows/%s", flow_id)
     with get_session() as session:
@@ -109,7 +124,7 @@ def update_flow(flow_id: int, payload: MapperFlowUpdateRequest):
         return _flow_to_response(MapperFlowService(session).get_flow(flow_id))
 
 
-@router.delete("/{flow_id}")
+@router.delete("/{flow_id}", summary="Delete a flow", description="Removes the flow and its step usages. Shared steps themselves survive, other flows using them are unaffected.")
 def delete_flow(flow_id: int):
     logger.info("DELETE /mapper/flows/%s", flow_id)
     with get_session() as session:
@@ -120,7 +135,13 @@ def delete_flow(flow_id: int):
         return {"deleted": True, "flow_id": flow_id}
 
 
-@router.post("/{flow_id}/steps", response_model=MapperFlowAddStepResponse)
+@router.post(
+    "/{flow_id}/steps", response_model=MapperFlowAddStepResponse, summary="Append a step to a flow",
+    description="Pass `step_id` to reuse an existing shared step as-is, or the fields to define a "
+    "new one. If the step's `source_screen_id` isn't reachable from what's already in the flow, "
+    "the ancestor chain needed to get there is resolved and attached automatically (issue #23); "
+    "`ancestors` in the response is exactly what got auto-added, in order, before the step itself.",
+)
 def add_step(flow_id: int, payload: MapperFlowStepCreateRequest):
     logger.info("POST /mapper/flows/%s/steps step_id=%s action_type=%s", flow_id, payload.step_id, payload.action_type)
     with get_session() as session:
@@ -134,7 +155,11 @@ def add_step(flow_id: int, payload: MapperFlowStepCreateRequest):
         )
 
 
-@router.patch("/{flow_id}/steps/{step_id}", response_model=MapperFlowStepResponse)
+@router.patch(
+    "/{flow_id}/steps/{step_id}", response_model=MapperFlowStepResponse, summary="Edit a shared step",
+    description="Steps are shared across flows by design (issue #23): this changes the step "
+    "itself, affecting every flow that uses it, not just this one.",
+)
 def update_step(flow_id: int, step_id: int, payload: MapperFlowStepUpdateRequest):
     logger.info("PATCH /mapper/flows/%s/steps/%s (shared step, affects every flow using it)", flow_id, step_id)
     with get_session() as session:
@@ -145,7 +170,10 @@ def update_step(flow_id: int, step_id: int, payload: MapperFlowStepUpdateRequest
         return _step_to_response(step)
 
 
-@router.delete("/{flow_id}/steps/{step_id}")
+@router.delete(
+    "/{flow_id}/steps/{step_id}", summary="Remove a step from one flow",
+    description="Detaches the step from this flow only; the step definition (and any other flow's use of it) is untouched.",
+)
 def remove_step(flow_id: int, step_id: int):
     logger.info("DELETE /mapper/flows/%s/steps/%s (removes from this flow only)", flow_id, step_id)
     with get_session() as session:
@@ -156,7 +184,13 @@ def remove_step(flow_id: int, step_id: int):
         return {"removed": True, "flow_id": flow_id, "step_id": step_id}
 
 
-@router.post("/{flow_id}/run", response_model=MapperFlowRunResponse)
+@router.post(
+    "/{flow_id}/run", response_model=MapperFlowRunResponse, summary="Run every step of a flow, in order",
+    description="Between steps, if the device's last known screen doesn't match the next step's "
+    "expected one, navigates there first automatically (direct route via #24, or app relaunch "
+    "and ancestor replay), the same gap-bridging `/device/actions` uses for a single action "
+    "(issue #26). Blocks until the whole flow finishes; each step's own result is in `steps`.",
+)
 def run_flow(flow_id: int, skip_dangerous_actions: bool = True):
     logger.info("POST /mapper/flows/%s/run", flow_id)
     with get_session() as session:
@@ -176,7 +210,11 @@ def run_flow(flow_id: int, skip_dangerous_actions: bool = True):
     )
 
 
-@router.post("/{flow_id}/steps/{ordinal}/run", response_model=MapperFlowStepResultResponse)
+@router.post(
+    "/{flow_id}/steps/{ordinal}/run", response_model=MapperFlowStepResultResponse, summary="Run a single step from a saved flow",
+    description="Runs against wherever the device currently is, no navigation attempted (unlike "
+    "`.../run`, which bridges gaps between steps). `ordinal` is the step's 0-based position in this flow.",
+)
 def run_step(flow_id: int, ordinal: int, skip_dangerous_actions: bool = True):
     logger.info("POST /mapper/flows/%s/steps/%s/run", flow_id, ordinal)
     with get_session() as session:
