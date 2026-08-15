@@ -27,6 +27,18 @@ class MapperRunResponse(BaseModel):
     complemented: bool = False
 
 
+class MapperScreenRemapResponse(BaseModel):
+    session_id: int
+    screen_id: int
+    package_name: str
+    mode: str
+    screens_recorded: int
+    actions_executed: int
+    scrolls_used: int
+    revisited_screens: int
+    status: str
+
+
 class MapperSessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

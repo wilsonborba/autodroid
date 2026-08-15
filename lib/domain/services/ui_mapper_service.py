@@ -197,6 +197,72 @@ class UiMapperService(MapperEngine):
             "reused": True,
         }
 
+    def remap_screen(self, session_id: int, screen_id: int) -> dict[str, Any]:
+        with session_scope() as session:
+            repository = SqlAlchemyMapperRepository(session)
+            mapper_session = repository.get_session(session_id)
+            if mapper_session is None:
+                raise LookupError(f"Mapper session {session_id} not found")
+            screen = repository.get_screen(screen_id)
+            if screen is None:
+                raise LookupError(f"Mapper screen {screen_id} not found")
+            if screen.session_id != session_id:
+                raise ValueError(f"Mapper screen {screen_id} does not belong to session {session_id}")
+
+            from lib.domain.services.mapper_flow_service import MapperFlowService
+
+            limits = self.mode_service.get_limits(mapper_session.mode)
+            package_name = mapper_session.package_name
+            _root_screen_id, ancestor_steps = MapperFlowService(session).resolve_restart_plan(package_name, screen_id)
+
+            self.navigation_context.prepare_fresh_app_launch(package_name)
+            for step in ancestor_steps:
+                if step.action_type != "click":
+                    raise ValueError(f"Unsupported restart step action_type: {step.action_type}")
+                candidates = step.selector_json.get("candidates") if step.selector_json else None
+                if not candidates:
+                    raise ValueError(f"Restart step {step.id} has no text candidates")
+                if not self.ui.click_first_by_text_or_description(*candidates):
+                    raise ValueError(f"Failed to replay restart step {step.id} to reach screen {screen_id}")
+
+            repository.reset_screen_expanded(screen_id)
+            mapper_session.status = MapperSessionStatus.RUNNING
+            session.commit()
+
+            baseline = self._load_state(repository, session_id)
+            state = baseline.copy()
+            visited_this_pass: set[int] = set()
+            self._explore(
+                repository,
+                session_id,
+                depth=screen.depth,
+                state=state,
+                visited_this_pass=visited_this_pass,
+                max_depth=max(mapper_session.max_depth, limits.max_depth),
+                max_actions=mapper_session.max_actions,
+                max_scrolls=mapper_session.max_scrolls,
+                max_consecutive_empty_scrolls=mapper_session.max_consecutive_empty_scrolls,
+                config_skip_dangerous_actions=mapper_session.skip_dangerous_actions,
+                package_name=package_name,
+            )
+
+            mapper_session.status = MapperSessionStatus.COMPLETED
+            mapper_session.finished_at = utc_now()
+            mapper_session.explored_up_to_depth = max(mapper_session.explored_up_to_depth, screen.depth)
+            session.commit()
+
+            return {
+                "session_id": mapper_session.id,
+                "screen_id": screen.id,
+                "package_name": mapper_session.package_name,
+                "mode": mapper_session.mode.value,
+                "screens_recorded": state["screens_recorded"] - baseline["screens_recorded"],
+                "actions_executed": state["actions_executed"] - baseline["actions_executed"],
+                "scrolls_used": state["scrolls_used"] - baseline["scrolls_used"],
+                "revisited_screens": state["revisited_screens"] - baseline["revisited_screens"],
+                "status": mapper_session.status.value,
+            }
+
     def _explore(
         self,
         repository: SqlAlchemyMapperRepository,

@@ -135,6 +135,14 @@ class SqlAlchemyMapperRepository:
         self.session.flush()
         return screen
 
+    def reset_screen_expanded(self, screen_id: int) -> MapperScreen:
+        screen = self.session.get(MapperScreen, screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        screen.expanded = False
+        self.session.flush()
+        return screen
+
     def find_action_by_key(self, session_id: int, screen_id: int, action_key: str) -> MapperAction | None:
         stmt = select(MapperAction).where(
             MapperAction.session_id == session_id,

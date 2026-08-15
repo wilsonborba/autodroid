@@ -42,7 +42,7 @@ _TEST_PACKAGE_NAMES = (
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
     "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
-    "com.candidatelog.testapp", "com.replaylog.testapp",
+    "com.candidatelog.testapp", "com.replaylog.testapp", "com.remapscreen.testapp",
 )
 
 
@@ -73,6 +73,10 @@ class FakeUi:
 
     def click_bounds(self, bounds: str) -> bool:
         self.clicks.append(bounds)
+        return True
+
+    def click_first_by_text_or_description(self, *candidates: str) -> bool:
+        self.clicks.append(f"text:{'|'.join(candidates)}")
         return True
 
     def swipe_up(self) -> None:
@@ -658,3 +662,102 @@ def test_scroll_and_interact_are_interleaved_not_scroll_then_click_at_the_end() 
         "swipe", "click:[0,70][100,80]",
         "swipe", "swipe", "swipe",
     ]
+
+
+def test_remap_screen_forces_reexploration_of_an_expanded_screen(monkeypatch) -> None:
+    class FakeMapperFlowService:
+        def __init__(self, session) -> None:
+            self.session = session
+
+        def resolve_restart_plan(self, package_name: str, source_screen_id: int):
+            return 1, []
+
+    monkeypatch.setattr("lib.domain.services.mapper_flow_service.MapperFlowService", FakeMapperFlowService)
+
+    target_dump = [
+        {"text": "Existing", "content_desc": "", "resource_id": "existing", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.remapscreen.testapp"},
+        {"text": "New Candidate", "content_desc": "", "resource_id": "new_candidate", "class_name": "TextView", "bounds": "[0,20][10,30]", "clickable": True, "enabled": True, "package_name": "com.remapscreen.testapp"},
+    ]
+    child_dump = [
+        {"text": "Child", "content_desc": "", "resource_id": "child", "class_name": "TextView", "bounds": "[0,40][10,50]", "clickable": False, "enabled": True, "package_name": "com.remapscreen.testapp"},
+    ]
+    fingerprint_service = MapperFingerprintService()
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(
+            package_name="com.remapscreen.testapp",
+            mode=MapperMode.LIGHT,
+            skip_dangerous_actions=True,
+            max_depth=2,
+            max_actions=8,
+            max_scrolls=0,
+        )
+        mapper_session.status = MapperSessionStatus.COMPLETED
+        mapper_session.explored_up_to_depth = 2
+        target = repository.create_screen(
+            session_id=mapper_session.id,
+            fingerprint=fingerprint_service.fingerprint(target_dump),
+            structural_signature=fingerprint_service.structural_signature(target_dump),
+            screen_key="target",
+            depth=1,
+            ordinal=0,
+        )
+        existing_node = repository.create_node(
+            screen_id=target.id,
+            node_key="0:existing",
+            text="Existing",
+            bounds="[0,0][10,10]",
+            clickable=True,
+            package_name="com.remapscreen.testapp",
+        )
+        existing_child = repository.create_screen(
+            session_id=mapper_session.id,
+            fingerprint=fingerprint_service.fingerprint(child_dump),
+            structural_signature=fingerprint_service.structural_signature(child_dump),
+            screen_key="child",
+            depth=2,
+            ordinal=1,
+        )
+        repository.mark_screen_expanded(existing_child.id)
+        existing_action = repository.create_action(
+            session_id=mapper_session.id,
+            screen_id=target.id,
+            node_id=existing_node.id,
+            action_key="click:0:existing",
+            action_type="click",
+            label="Existing",
+            safety=MapperActionSafety.SAFE,
+            executed=True,
+            success=True,
+        )
+        repository.create_transition(
+            session_id=mapper_session.id,
+            from_screen_id=target.id,
+            action_id=existing_action.id,
+            to_screen_id=existing_child.id,
+            result_type="clicked",
+        )
+        repository.mark_screen_expanded(target.id)
+        session.commit()
+        session_id = mapper_session.id
+        screen_id = target.id
+
+    service = build_service([target_dump, child_dump, target_dump])
+
+    result = service.remap_screen(session_id, screen_id)
+
+    assert result["session_id"] == session_id
+    assert result["screen_id"] == screen_id
+    assert result["screens_recorded"] == 0
+    assert result["actions_executed"] == 1
+    assert service.navigation_context.prepared == ["com.remapscreen.testapp"]
+    assert service.ui.clicks == ["[0,20][10,30]"]
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screen = repository.get_screen(screen_id)
+        assert screen is not None
+        assert screen.expanded is True
+        actions = repository.list_actions(session_id, screen_id=screen_id)
+        assert [action.label for action in actions] == ["Existing", "New Candidate"]
