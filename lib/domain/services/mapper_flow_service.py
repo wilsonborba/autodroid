@@ -149,6 +149,18 @@ class MapperFlowService:
         root_screen_id = ancestor_steps[0].source_screen_id if ancestor_steps else source_screen_id
         return root_screen_id, ancestor_steps
 
+    def get_or_create_step_for_action(self, package_name: str, action_id: int) -> MapperFlowStep:
+        """Turns an already-mapped MapperAction into a reusable step (issue #32): firing the same
+        mapped action on demand more than once reuses the same step instead of creating
+        duplicates, the same sharing already used for a manually composed Flow (#23)."""
+        existing = self.flow_repository.find_step_by_source_action(package_name, action_id)
+        if existing is not None:
+            return existing
+        transition = self.mapper_repository.find_transition_by_action(action_id)
+        if transition is None:
+            raise ValueError(f"Mapper action {action_id} has no known transition (was it ever clicked while mapping?)")
+        return self._create_step_from_transition(package_name, transition)
+
     def _resolve_ancestor_steps(self, package_name: str, source_screen_id: int) -> list[MapperFlowStep]:
         """Walks MapperTransition backwards from `source_screen_id` up to the session root,
         ensuring a reusable step exists for each ancestor action (reused by source_action_id

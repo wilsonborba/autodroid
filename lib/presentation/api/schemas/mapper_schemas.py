@@ -177,8 +177,9 @@ class MapperFlowStepResultResponse(BaseModel):
     skipped_reason: str | None = None
     error: str | None = None
     node_count: int | None = None
+    nodes: list[dict[str, Any]] | None = None  # set by dump_nodes, was silently dropped before #32
     screenshot_path: str | None = None
-    ocr_lines: list[str] | None = None
+    ocr_regions: list[dict[str, str]] | None = None  # {"text": ..., "bounds": "[x1,y1][x2,y2]"} (#32)
     iterations_run: int | None = None  # set when the step had a `repeat` limit (issue #22)
     stop_reason: str | None = None  # "max_iterations" | "max_duration_seconds" | "execution_window" | "no_new_content"
 
