@@ -10,8 +10,11 @@ class DeviceActionRequest(BaseModel):
     # a mapped action: gets navigated to automatically before running (issue #32)
     target_action_id: int | None = None
     current_screen_id: int | None = None
-    # a raw action against whatever's on screen right now, no navigation attempted
+    # a raw action (action_type) against a specific known screen (target_screen_id, navigates
+    # there first same as target_action_id) or, without target_screen_id, against whatever's on
+    # screen right now with no navigation attempted at all
     action_type: str | None = None
+    target_screen_id: int | None = None
     selector: dict[str, Any] | None = None
     params: dict[str, Any] | None = None
 
