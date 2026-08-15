@@ -106,10 +106,12 @@ class UiMapperService(MapperEngine):
                 max_depth=limits.max_depth,
                 max_actions=limits.max_actions,
                 max_scrolls=limits.max_scrolls,
+                repeat_signature_threshold=limits.repeat_signature_threshold,
                 metadata_json={"mode": config.mode.value},
             )
             mapper_session.status = MapperSessionStatus.RUNNING
             mapper_session.started_at = utc_now()
+            repository.session.commit()  # the session row itself must survive a crash, not just its data (issue #25)
             return self._continue_session(repository, mapper_session, target_max_depth=limits.max_depth, limits=limits, config=config, fresh=True)
 
     def _continue_session(
@@ -129,6 +131,8 @@ class UiMapperService(MapperEngine):
             mapper_session.max_depth = target_max_depth
             mapper_session.max_actions = max(mapper_session.max_actions, limits.max_actions)
             mapper_session.max_scrolls = max(mapper_session.max_scrolls, limits.max_scrolls)
+            mapper_session.repeat_signature_threshold = max(mapper_session.repeat_signature_threshold, limits.repeat_signature_threshold)
+            repository.session.commit()
 
         state = self._load_state(repository, mapper_session.id)
         visited_this_pass: set[int] = set()
@@ -141,12 +145,14 @@ class UiMapperService(MapperEngine):
             max_depth=target_max_depth,
             max_actions=mapper_session.max_actions,
             max_scrolls=mapper_session.max_scrolls,
+            repeat_signature_threshold=mapper_session.repeat_signature_threshold,
             config_skip_dangerous_actions=config.skip_dangerous_actions,
         )
 
         mapper_session.status = MapperSessionStatus.COMPLETED
         mapper_session.finished_at = utc_now()
         mapper_session.explored_up_to_depth = target_max_depth
+        repository.session.commit()
         self.logger.info(
             "Completed mapper session %s for %s (explored_up_to_depth=%s)",
             mapper_session.id, mapper_session.package_name, target_max_depth,
@@ -200,16 +206,25 @@ class UiMapperService(MapperEngine):
         max_depth: int,
         max_actions: int,
         max_scrolls: int,
+        repeat_signature_threshold: int,
         config_skip_dangerous_actions: bool,
+        previous_scroll_signature: str | None = None,
+        consecutive_repeat_count: int = 0,
     ) -> int | None:
         nodes = self.ui.dump_nodes()
         fingerprint = self.fingerprint_service.fingerprint(nodes)
+        structural_signature = self.fingerprint_service.structural_signature(nodes)
+        if previous_scroll_signature is not None and structural_signature == previous_scroll_signature:
+            consecutive_repeat_count += 1
+        else:
+            consecutive_repeat_count = 0
         existing_screen = repository.find_screen_by_fingerprint(session_id, fingerprint)
 
         if existing_screen is not None:
             repository.increment_screen_visit_count(existing_screen.id)
             state["revisited_screens"] += 1
             screen = existing_screen
+            repository.session.commit()
             if screen.id in visited_this_pass:
                 # cycle within this same traversal pass (e.g. an in-app back button): already
                 # being handled higher up this same call stack, stop here to avoid recursing forever
@@ -245,6 +260,10 @@ class UiMapperService(MapperEngine):
                 )
                 for index, node in enumerate(nodes)
             ]
+            # commit as soon as a screen and its nodes exist (issue #25): a crash right after
+            # this point still leaves this screen durable and resumable, not lost with everything
+            # else in one giant uncommitted transaction
+            repository.session.commit()
 
         visited_this_pass.add(screen.id)
 
@@ -261,7 +280,7 @@ class UiMapperService(MapperEngine):
                 if node is None or not node.bounds:
                     continue
                 if self.ui.click_bounds(node.bounds):
-                    self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                    self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions)
                     self.adb.press_back()
             return screen.id
 
@@ -278,7 +297,7 @@ class UiMapperService(MapperEngine):
                 if existing_action.executed and existing_action.success and existing_action.node_id:
                     existing_node = repository.get_node(existing_action.node_id)
                     if existing_node and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
-                        self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                        self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions)
                         self.adb.press_back()
                 continue
 
@@ -303,16 +322,18 @@ class UiMapperService(MapperEngine):
                     to_screen_id=None,
                     result_type="skipped_dangerous",
                 )
+                repository.session.commit()
                 continue
             if not candidate.bounds:
                 action.skipped_reason = "missing_bounds"
+                repository.session.commit()
                 continue
             success = self.ui.click_bounds(candidate.bounds)
             action.executed = True
             action.success = success
             state["actions_executed"] += 1
             if success:
-                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions)
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
@@ -329,13 +350,23 @@ class UiMapperService(MapperEngine):
                     to_screen_id=None,
                     result_type="failed_click",
                 )
+            # commit per action (issue #25): whatever already ran is durable before moving on,
+            # a crash mid-mapping only ever loses the one action currently in flight
+            repository.session.commit()
 
         repository.mark_screen_expanded(screen.id)
+        repository.session.commit()
 
-        if max_scrolls > 0 and state["scrolls_used"] < max_scrolls:
+        screen_has_scrollable_content = any(node.get("scrollable") for node in nodes)
+        if screen_has_scrollable_content and max_scrolls > 0 and state["scrolls_used"] < max_scrolls and consecutive_repeat_count < repeat_signature_threshold:
             self.ui.swipe_up()
             state["scrolls_used"] += 1
-            self._explore(repository, session_id, depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+            self._explore(
+                repository, session_id, depth=depth, state=state, visited_this_pass=visited_this_pass,
+                max_depth=max_depth, max_actions=max_actions, max_scrolls=max_scrolls,
+                repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions,
+                previous_scroll_signature=structural_signature, consecutive_repeat_count=consecutive_repeat_count,
+            )
 
         return screen.id
 

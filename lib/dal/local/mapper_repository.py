@@ -22,6 +22,7 @@ class SqlAlchemyMapperRepository:
         max_depth: int,
         max_actions: int,
         max_scrolls: int,
+        repeat_signature_threshold: int = 20,
         metadata_json: dict[str, Any] | None = None,
     ) -> MapperSession:
         mapper_session = MapperSession(
@@ -32,6 +33,7 @@ class SqlAlchemyMapperRepository:
             max_depth=max_depth,
             max_actions=max_actions,
             max_scrolls=max_scrolls,
+            repeat_signature_threshold=repeat_signature_threshold,
             metadata_json=metadata_json,
         )
         self.session.add(mapper_session)
