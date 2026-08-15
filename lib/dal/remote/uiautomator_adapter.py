@@ -21,10 +21,13 @@ class UiAutomatorAdapter:
 
     @property
     def device(self):
+        # an already-set _device (a real connection, or a fake injected by a test) wins over the
+        # availability check, same fix as the OCR adapter's equivalent property (issue #32)
+        if self._device is not None:
+            return self._device
         if u2 is None:
             raise RuntimeError("uiautomator2 is not available in this environment")
-        if self._device is None:
-            self._device = u2.connect(self.serial)
+        self._device = u2.connect(self.serial)
         return self._device
 
     def app_start(self, package_name: str) -> None:
@@ -96,6 +99,18 @@ class UiAutomatorAdapter:
         self.device.screenshot(str(path))
         self.logger.debug("Saved screenshot to %s", path)
         return path
+
+    def type_text(self, text: str, *, clear: bool = False) -> bool:
+        # types into whatever's currently focused, same field a prior click/click_bounds put the
+        # cursor in: it is deliberately not "click this field and type", one thing per call, same
+        # shape as every other action here (issue #35)
+        try:
+            self.device.send_keys(text, clear=clear)
+        except Exception:
+            self.logger.debug("Unable to type text: %r", text)
+            return False
+        time.sleep(1)
+        return True
 
     def click_bounds(self, bounds: str) -> bool:
         try:
