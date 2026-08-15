@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
 import sys
 from enum import Enum
+from pathlib import Path
 
 
 class LogTarget(str, Enum):
@@ -25,6 +27,11 @@ MESSAGE_COLOR = "\033[38;5;255m"
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# bounds how big the log file (and /logs/stream's history) can get: 5MB active + 3 rotated
+# backups, 20MB total ceiling, debug-level detail across a whole process adds up fast otherwise
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
+LOG_FILE_BACKUP_COUNT = 3
 
 
 class StructuredFormatter(logging.Formatter):
@@ -80,19 +87,34 @@ def _resolve_level(*, debug: bool, verbose: bool, target: LogTarget) -> int:
     return logging.WARNING
 
 
-def configure_logging(*, debug: bool, verbose: bool = False, target: LogTarget = LogTarget.CLI) -> None:
+def configure_logging(*, debug: bool, verbose: bool = False, target: LogTarget = LogTarget.CLI, log_file: Path | None = None) -> None:
     level = _resolve_level(debug=debug, verbose=verbose, target=target)
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
-    root_logger.setLevel(level)
+    # the root logger's own level has to stay at the lowest anything might want: the file
+    # handler below always captures full debug detail for /logs/stream to tail (issue #39),
+    # regardless of --verbose or of the CLI/API target, a record filtered out here never even
+    # reaches a handler to decide about individually. Each handler's own level is what actually
+    # controls what it emits.
+    root_logger.setLevel(logging.DEBUG)
 
     stream = sys.stderr if target == LogTarget.CLI else sys.stdout
-    handler = logging.StreamHandler(stream)
-    handler.setLevel(level)
-    handler.setFormatter(StructuredFormatter(use_color=_should_use_color(target)))
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(StructuredFormatter(use_color=_should_use_color(target)))
     if target == LogTarget.CLI:
-        handler.addFilter(CliFilter(verbose=verbose))
-    root_logger.addHandler(handler)
+        stream_handler.addFilter(CliFilter(verbose=verbose))
+    root_logger.addHandler(stream_handler)
+
+    if log_file is not None:
+        # rotates instead of growing forever (issue #39 follow-up): debug-level detail across
+        # the whole process adds up fast, a handful of bounded files stay easy to open/tail,
+        # an unbounded one eventually doesn't
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=LOG_FILE_MAX_BYTES, backupCount=LOG_FILE_BACKUP_COUNT)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(StructuredFormatter(use_color=False))
+        root_logger.addHandler(file_handler)
 
     for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "httpx"]:
         third_party = logging.getLogger(logger_name)

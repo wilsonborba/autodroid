@@ -15,6 +15,7 @@ from lib.domain.services.local_mapper_export_service import LocalMapperExportSer
 from lib.domain.services.mapper_remap_task import MapperRemapTask
 from lib.presentation.api.routes.device_actions import router as device_actions_router
 from lib.presentation.api.routes.jobs import router as jobs_router
+from lib.presentation.api.routes.logs_stream import router as logs_stream_router
 from lib.presentation.api.routes.mapper import router as mapper_router
 from lib.presentation.api.routes.mapper_flows import router as mapper_flows_router
 
@@ -72,6 +73,11 @@ Three phases, in order, each with its own route group:
 
 A single physical device is shared by everything above and by the job queue (`/jobs`): only one
 interaction happens at a time, nothing here needs to worry about a concurrent conflicting action.
+
+`WS /logs/stream` tails the backend's own log live (issue #39): connect while a request against
+any of the above is running to watch what it's actually doing, not just its final response. Not
+an OpenAPI operation (WebSocket routes aren't part of the spec), see the route's own docstring in
+`lib/presentation/api/routes/logs_stream.py`.
 """
 
 
@@ -98,17 +104,24 @@ API_TAGS = [
         "and reprioritize queued work; check what the worker is currently doing.",
     },
     {"name": "health", "description": "Process liveness, no dependencies checked."},
+    {
+        "name": "logs",
+        "description": "Live log access. WS /logs/stream tails the backend's log file in real "
+        "time (CLI or API, any route, issue #39); not an HTTP operation, so it never appears "
+        "below as one, see its own docstring.",
+    },
 ]
 
 
 def create_api_app() -> FastAPI:
     settings = get_settings()
-    configure_logging(debug=settings.debug, verbose=False, target=LogTarget.API)
+    configure_logging(debug=settings.debug, verbose=False, target=LogTarget.API, log_file=settings.log_file)
     app = FastAPI(title="autodroid", version="0.1.0", description=API_DESCRIPTION, openapi_tags=API_TAGS, docs_url=None)
     app.include_router(jobs_router)
     app.include_router(mapper_router)
     app.include_router(mapper_flows_router)
     app.include_router(device_actions_router)
+    app.include_router(logs_stream_router)
 
     @app.get("/docs", include_in_schema=False, response_class=HTMLResponse)
     def scalar_docs() -> str:
