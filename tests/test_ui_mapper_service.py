@@ -447,3 +447,22 @@ def test_scrolling_a_fixed_content_page_accumulates_into_the_same_screen() -> No
         screen = repository.list_screens(result["session_id"])[0]
         node_texts = {node.text for node in repository.get_screen(screen.id).nodes}
         assert {"About", "Experience", "Education"} <= node_texts  # all sections accumulated here
+
+
+MESSAGE_TARGET_ROOT = [{"resource_id": "message_btn", "text": "Message", "content_desc": "", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+COMPOSE_SCREEN = [{"resource_id": "send_btn", "text": "Send", "content_desc": "", "class_name": "TextView", "bounds": "[0,50][10,60]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+
+
+def test_peek_candidate_catalogs_revealed_screen_without_exploring_it() -> None:
+    service = build_service([MESSAGE_TARGET_ROOT, COMPOSE_SCREEN])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    assert result["screens_recorded"] == 2  # root + the revealed compose screen, catalogued
+    assert "[0,50][10,60]" not in service.ui.clicks  # Send was never clicked
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])
+        compose_screen = screens[1]
+        assert repository.list_actions(result["session_id"], screen_id=compose_screen.id) == []

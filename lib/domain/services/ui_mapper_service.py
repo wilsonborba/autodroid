@@ -212,6 +212,7 @@ class UiMapperService(MapperEngine):
         config_skip_dangerous_actions: bool,
         package_name: str,
         ancestor_bounds: list[str] | None = None,
+        peek_only: bool = False,
     ) -> int | None:
         ancestor_bounds = ancestor_bounds if ancestor_bounds is not None else []
         nodes = self.ui.dump_nodes()
@@ -236,7 +237,7 @@ class UiMapperService(MapperEngine):
             persisted_nodes = repository.get_screen(screen.id).nodes
             node_id_by_key = {node.node_key: node.id for node in persisted_nodes}
 
-            if depth >= max_depth:
+            if peek_only or depth >= max_depth:
                 return screen.id
 
             if existing_screen.expanded:
@@ -286,6 +287,12 @@ class UiMapperService(MapperEngine):
             # else in one giant uncommitted transaction
             repository.session.commit()
             visited_this_pass.add(screen.id)
+
+            if peek_only:
+                # catalogued (screen + nodes already persisted above), never explored further:
+                # opening "Message" reveals a compose screen, that's not an invitation to also
+                # try clicking Send inside it (issue #31)
+                return screen.id
 
             if repository.has_other_screen_with_structural_signature(session_id, structural_signature, exclude_screen_id=screen.id):
                 # another screen of this same type (e.g. yet another person's profile page) is
@@ -356,7 +363,11 @@ class UiMapperService(MapperEngine):
             action.success = success
             state["actions_executed"] += 1
             if success:
-                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds])
+                # reveals a sub-interface without necessarily doing anything itself ("Message"
+                # opens a compose screen, it doesn't send one): catalog what it reveals, never
+                # click anything inside it (issue #31)
+                peek = self.safety_service.is_peek_candidate(candidate.node, candidate.label)
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, repeat_signature_threshold=repeat_signature_threshold, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds], peek_only=peek)
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
