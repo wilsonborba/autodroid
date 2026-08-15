@@ -7,3 +7,5 @@ from lib.domain.services.mapper_export_service import MapperExportService
 from lib.domain.services.mapper_mode_service import MapperModeService
 
 from lib.domain.services.ui_mapper_service import UiMapperService
+
+from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService

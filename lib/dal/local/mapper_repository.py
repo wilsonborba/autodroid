@@ -89,3 +89,12 @@ class SqlAlchemyMapperRepository:
     def find_screen_by_fingerprint(self, session_id: int, fingerprint: str) -> MapperScreen | None:
         stmt = select(MapperScreen).where(MapperScreen.session_id == session_id, MapperScreen.fingerprint == fingerprint)
         return self.session.scalar(stmt)
+
+
+    def increment_screen_visit_count(self, screen_id: int) -> MapperScreen:
+        screen = self.session.get(MapperScreen, screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        screen.visit_count += 1
+        self.session.flush()
+        return screen
