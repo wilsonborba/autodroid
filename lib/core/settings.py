@@ -14,6 +14,7 @@ class Settings:
     worker_name: str
     queue_poll_interval_seconds: float
     output_dir: Path
+    log_file: Path
     app_timezone: str
     android_serial: str
     linkedin_package_name: str
@@ -35,6 +36,7 @@ def load_settings() -> Settings:
         worker_name=os.getenv("AUTODROID_WORKER_NAME", "main"),
         queue_poll_interval_seconds=float(os.getenv("AUTODROID_QUEUE_POLL_INTERVAL_SECONDS", "2.0")),
         output_dir=Path(os.getenv("AUTODROID_OUTPUT_DIR", "output")),
+        log_file=Path(os.getenv("AUTODROID_LOG_FILE", "var/logs/autodroid.log")),
         app_timezone=os.getenv("AUTODROID_TIMEZONE", "UTC"),
         android_serial=os.getenv("ANDROID_SERIAL", "127.0.0.1:5555"),
         linkedin_package_name=os.getenv("LINKEDIN_PACKAGE_NAME", "com.linkedin.android"),

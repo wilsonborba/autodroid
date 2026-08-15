@@ -36,7 +36,7 @@ mapper_app.add_typer(flow_app, name="flow")
 @app.callback()
 def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable detailed CLI logs")) -> None:
     settings = get_settings()
-    configure_logging(debug=settings.debug, verbose=verbose, target=LogTarget.CLI)
+    configure_logging(debug=settings.debug, verbose=verbose, target=LogTarget.CLI, log_file=settings.log_file)
 
 
 def _parse_json_payload(raw: str | None) -> dict:
