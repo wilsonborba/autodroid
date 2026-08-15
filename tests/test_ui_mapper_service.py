@@ -13,11 +13,11 @@ from lib.domain.services.mapper_safety_service import MapperSafetyService
 from lib.domain.services.ui_mapper_service import UiMapperService
 
 ROOT_NODES = [{"text": "Profile", "content_desc": "", "resource_id": "profile_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True}]
-LEAF_NODES = [{"text": "Details", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True}]
+LEAF_NODES = [{"text": "", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True}]
 DANGEROUS_ROOT_NODES = [{"text": "Delete account", "content_desc": "", "resource_id": "delete_account", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True}]
 
 IN_APP_ROOT = [{"text": "Profile", "content_desc": "", "resource_id": "profile_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
-IN_APP_LEAF = [{"text": "Details", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
+IN_APP_LEAF = [{"text": "", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
 FOREIGN_APP_SCREEN = [{"text": "Share via", "content_desc": "", "resource_id": "chooser_item", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.android.systemui"}]
 MIXED_PACKAGE_ROOT = [
     {"text": "Search jobs", "content_desc": "", "resource_id": "search_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"},
@@ -171,6 +171,41 @@ def test_candidates_from_other_packages_are_never_attempted() -> None:
     assert result["actions_executed"] == 1
     assert service.ui.clicks == ["[0,0][10,10]"]  # the systemui clock was never clicked
     assert result["screens_recorded"] == 2
+
+
+def test_non_clickable_labeled_node_is_still_a_candidate() -> None:
+    # LinkedIn (and apparently other apps) regularly exports a genuinely tappable element as
+    # clickable=false in the accessibility tree, class doesn't matter either: a plain TextView
+    # ("Groups", in the real case that surfaced this) turned out just as tappable as a proper
+    # Button. The app's own flag isn't trusted anymore, the safety classification is the real
+    # gate against wasting a click, not this accessibility attribute (issue #37).
+    root = [{
+        "text": "Wilson Borba", "content_desc": "", "resource_id": "profile_card",
+        "class_name": "android.widget.Button", "bounds": "[0,0][10,10]",
+        "clickable": False, "enabled": True, "package_name": "com.target.testapp",
+    }]
+    service = build_service([root, IN_APP_LEAF])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    assert result["actions_executed"] == 1
+    assert service.ui.clicks == ["[0,0][10,10]"]
+
+
+def test_non_clickable_plain_textview_is_still_a_candidate() -> None:
+    # same as above, but without even a Button-ish class name, exactly the "Groups" case: a
+    # plain android.widget.TextView with no clickable flag at all, still worth trying
+    root = [{
+        "text": "Groups", "content_desc": "", "resource_id": "home_nav_panel_section_text",
+        "class_name": "android.widget.TextView", "bounds": "[0,0][10,10]",
+        "clickable": False, "enabled": True, "package_name": "com.target.testapp",
+    }]
+    service = build_service([root, IN_APP_LEAF])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    assert result["actions_executed"] == 1
+    assert service.ui.clicks == ["[0,0][10,10]"]
 
 
 def test_leaving_the_app_from_a_deep_screen_relaunches_and_replays_the_way_back() -> None:
@@ -439,6 +474,11 @@ def test_scrolling_a_fixed_content_page_accumulates_into_the_same_screen() -> No
     sections = ["About", "Experience", "Education", "Education", "Education", "Education", "Education"]
     dumps = [_fixed_content_dump(s) for s in sections]
     service = build_service(dumps)
+    # each section header is real, labeled content (needed below), so it's now also a candidate
+    # in its own right (issue #37); this fixture is only about scroll accumulation, so a click
+    # attempt on one is made to fail harmlessly instead of recursing into the next queued dump,
+    # which is reserved for the next scroll, not "whatever clicking a section header reveals"
+    service.ui.click_bounds = lambda bounds: False
 
     result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
 
@@ -470,9 +510,13 @@ def test_peek_candidate_catalogs_revealed_screen_without_exploring_it() -> None:
 
 
 def _scrollable_dump(section_text: str) -> list[dict]:
+    # the varying marker lives in resource_id, not text (issue #37 review): a labeled node is
+    # now a candidate on its own regardless of clickable, this fixture only cares about scroll
+    # behaviour, not click behaviour, so it stays label-less on purpose (node_key still differs
+    # per scroll via resource_id, which is all "new content this scroll" detection needs)
     return [
         {"resource_id": "scroll_container", "text": "", "content_desc": "", "class_name": "ScrollView", "bounds": "[0,0][100,800]", "clickable": False, "enabled": True, "scrollable": True, "package_name": "com.scrollbudget.testapp"},
-        {"resource_id": "section_text", "text": section_text, "content_desc": "", "class_name": "TextView", "bounds": "[0,50][100,100]", "clickable": False, "enabled": True, "package_name": "com.scrollbudget.testapp"},
+        {"resource_id": f"section_text_{section_text}", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,50][100,100]", "clickable": False, "enabled": True, "package_name": "com.scrollbudget.testapp"},
     ]
 
 

@@ -566,12 +566,26 @@ class UiMapperService(MapperEngine):
             self.ui.click_bounds(bounds)
 
     def _extract_candidates(self, nodes: list[dict[str, Any]], package_name: str) -> list[MapperActionCandidate]:
+        # clickable="false" is not trusted on its own (issue #37): LinkedIn (and apparently other
+        # apps) regularly exports genuinely tappable elements that way, class doesn't matter
+        # either, a plain TextView ("Groups") turned out just as tappable as a real Button. The
+        # actual gate against wasting a click on this stays the safety classification below (an
+        # attempt that does nothing is harmless, dedup notices the screen didn't change), not
+        # this accessibility flag the app itself doesn't always report correctly.
+        #
+        # a real, announced label is required to trust a non-clickable node though: without that,
+        # this would also catch every plain structural container (a ScrollView/RecyclerView/
+        # FrameLayout almost always carries a resource_id but no text of its own), a resource_id
+        # alone was only ever a weak fallback for an icon-only *clickable* button. A scrollable
+        # container is excluded either way, that's a region to scroll, not a thing to tap.
         candidates: list[MapperActionCandidate] = []
         for index, node in enumerate(nodes):
             label = str(node.get("text") or node.get("content_desc") or "").strip() or None
-            if not node.get("clickable"):
+            if not node.get("clickable") and not label:
                 continue
             if not label and not node.get("resource_id"):
+                continue
+            if node.get("scrollable"):
                 continue
             # a dump includes whatever else is on screen too (status bar, nav bar, launcher
             # edges), each carrying its own package_name: clicking those wastes the action
