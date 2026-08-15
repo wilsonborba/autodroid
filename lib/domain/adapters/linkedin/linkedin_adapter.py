@@ -9,7 +9,7 @@ from lib.core.settings import Settings
 from lib.core.utils.json_utils import write_json
 from lib.dal.local.database import session_scope
 from lib.dal.remote.adb_adapter import AdbAdapter
-from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep
+from lib.domain.models.mapper_flow_model import MapperFlowStep
 from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
 from lib.domain.services.mapper_flow_service import MapperFlowService
 from lib.domain.services.navigation_context_service import NavigationContextService
@@ -41,8 +41,8 @@ class LinkedInAdapter:
         self._ensure_device_ready()
         self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
 
-        flow = self._ensure_extract_profile_flow()
-        entrypoint_result = self.flow_execution_service.run_step(flow.steps[0])
+        entrypoint_step = self._ensure_entrypoint_step()
+        entrypoint_result = self.flow_execution_service.run_step(entrypoint_step)
         profile_opened = bool(entrypoint_result.get("success"))
 
         scrolls = int(payload.get("scrolls", 2))
@@ -77,7 +77,7 @@ class LinkedInAdapter:
             write_json(output_path, result)
         return result
 
-    def _ensure_extract_profile_flow(self) -> MapperFlow:
+    def _ensure_entrypoint_step(self) -> MapperFlowStep:
         with session_scope() as session:
             service = MapperFlowService(session)
             flow = service.flow_repository.get_flow_by_name(self.settings.linkedin_package_name, EXTRACT_PROFILE_FLOW_NAME)
@@ -103,14 +103,15 @@ class LinkedInAdapter:
                         }
                     ],
                 )
-            return flow
+            return service.flow_repository.ordered_steps(flow)[0]
 
-    @staticmethod
-    def _transient_step(action_type: str, *, selector_json: dict[str, Any] | None = None, params_json: dict[str, Any] | None = None) -> MapperFlowStep:
+    def _transient_step(self, action_type: str, *, selector_json: dict[str, Any] | None = None, params_json: dict[str, Any] | None = None) -> MapperFlowStep:
         """A step used for this call only, not persisted. Reuses the execution service's
         handlers (dump/scroll/screenshot/ocr) without requiring every extraction run to
         write a fixed, payload-independent step count into the flow definition."""
-        return MapperFlowStep(flow_id=0, ordinal=0, action_type=action_type, selector_json=selector_json or {}, params_json=params_json)
+        step = MapperFlowStep(package_name=self.settings.linkedin_package_name, action_type=action_type, selector_json=selector_json or {}, params_json=params_json)
+        step.id = 0
+        return step
 
     def _ensure_device_ready(self) -> None:
         if self.adb.get_state() != "device":

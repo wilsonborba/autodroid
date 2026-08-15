@@ -23,20 +23,45 @@ class MapperFlow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
-    steps: Mapped[list[MapperFlowStep]] = relationship(back_populates="flow", cascade="all, delete-orphan", order_by="MapperFlowStep.ordinal")
+    step_usages: Mapped[list[MapperFlowStepUsage]] = relationship(
+        back_populates="flow", cascade="all, delete-orphan", order_by="MapperFlowStepUsage.ordinal"
+    )
 
 
 class MapperFlowStep(Base):
+    """A reusable step definition, scoped to a package_name (not to a single Flow).
+
+    The same step (e.g. "click Profile", born from a specific mapped `source_action_id`) can be
+    attached to several Flows through `MapperFlowStepUsage` instead of being redefined per Flow.
+    Editing a step here affects every Flow that references it, that's the point of it being a
+    shared component instead of an inline, per-Flow definition (issue #23).
+    """
+
     __tablename__ = "mapper_flow_steps"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    flow_id: Mapped[int] = mapped_column(ForeignKey("mapper_flows.id", ondelete="CASCADE"), nullable=False)
-    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    package_name: Mapped[str] = mapped_column(String(160), nullable=False)
     action_type: Mapped[str] = mapped_column(String(80), nullable=False)
     selector_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     safety: Mapped[MapperActionSafety] = mapped_column(SqlEnum(MapperActionSafety, name="mapper_action_safety"), nullable=False, default=MapperActionSafety.SAFE)
     source_screen_id: Mapped[int | None] = mapped_column(ForeignKey("mapper_screens.id", ondelete="SET NULL"), nullable=True)
     source_action_id: Mapped[int | None] = mapped_column(ForeignKey("mapper_actions.id", ondelete="SET NULL"), nullable=True)
     params_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
-    flow: Mapped[MapperFlow] = relationship(back_populates="steps")
+    usages: Mapped[list[MapperFlowStepUsage]] = relationship(back_populates="step", cascade="all, delete-orphan")
+
+
+class MapperFlowStepUsage(Base):
+    """Association between a Flow and a (reusable) step, with the step's position in that Flow."""
+
+    __tablename__ = "mapper_flow_step_usages"
+    __table_args__ = (UniqueConstraint("flow_id", "step_id", name="uq_mapper_flow_step_usage"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    flow_id: Mapped[int] = mapped_column(ForeignKey("mapper_flows.id", ondelete="CASCADE"), nullable=False)
+    step_id: Mapped[int] = mapped_column(ForeignKey("mapper_flow_steps.id", ondelete="CASCADE"), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    flow: Mapped[MapperFlow] = relationship(back_populates="step_usages")
+    step: Mapped[MapperFlowStep] = relationship(back_populates="usages")
