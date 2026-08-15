@@ -11,7 +11,7 @@ from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_model import MapperSession
-from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
+from lib.domain.models.mapper_types import MapperActionSafety, MapperLimits, MapperRunConfig, MapperSessionStatus
 from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
@@ -28,6 +28,25 @@ class MapperActionCandidate:
 
 
 class UiMapperService(MapperEngine):
+    """Explores an app's UI and persists the discovered screens/actions/transitions.
+
+    Exploration is checkpointed per session via `MapperScreen.expanded` (has this screen's
+    candidates already been tried?) and `MapperSession.explored_up_to_depth` (how deep has the
+    session been fully explored?). This lets a session be extended later (`complement`, issue
+    #20) to a deeper mode, or resumed after a crash, without duplicating already-known data or
+    re-navigating past what's already known: a known-but-unexpanded screen is expanded for the
+    first time; a known-and-expanded screen is only re-walked (via its already-successful
+    actions) to reach unexplored children below it, never re-classified.
+
+    Traversal is still depth-first at the physical-click level (iterative deepening, not a
+    literal breadth-first frontier with path replay): the device has no way to "teleport" to a
+    mid-tree screen, reaching one always means physically clicking through from the app's root,
+    which is exactly what DFS-with-backtrack already does naturally. Raising `max_depth` and
+    re-running the same traversal is functionally equivalent to BFS-by-layer for the purpose of
+    the checkpoint (`explored_up_to_depth`), without the complexity of maintaining a separate
+    frontier/path-replay structure.
+    """
+
     def __init__(self, settings: Settings) -> None:
         self.logger = get_logger(__name__)
         self.settings = settings
@@ -39,15 +58,41 @@ class UiMapperService(MapperEngine):
         self.safety_service = MapperSafetyService()
 
     def run(self, config: MapperRunConfig) -> dict[str, Any]:
+        if config.override and config.complement:
+            raise ValueError("override and complement cannot both be set")
+
         limits = self.mode_service.get_limits(config.mode)
 
         if not config.override:
             with session_scope() as session:
                 repository = SqlAlchemyMapperRepository(session)
+
+                resumable = repository.get_resumable_session(config.package_name)
+                if resumable is not None:
+                    target_max_depth = max(resumable.max_depth, limits.max_depth)
+                    self.logger.info(
+                        "Resuming interrupted mapper session %s for %s up to depth %s",
+                        resumable.id, config.package_name, target_max_depth,
+                    )
+                    return self._continue_session(repository, resumable, target_max_depth=target_max_depth, limits=limits, config=config, fresh=False)
+
                 existing = repository.get_latest_session(config.package_name, status=MapperSessionStatus.COMPLETED)
                 if existing is not None:
-                    self.logger.info("Reusing mapper session %s for %s (override=False)", existing.id, config.package_name)
-                    return self._reused_session_result(existing)
+                    if not config.complement:
+                        self.logger.info("Reusing mapper session %s for %s (override=False)", existing.id, config.package_name)
+                        result = self._reused_session_result(existing)
+                        result["complemented"] = False
+                        return result
+                    if existing.explored_up_to_depth >= limits.max_depth:
+                        self.logger.info("Session %s already satisfies %s, complement is a no-op", existing.id, config.mode.value)
+                        result = self._reused_session_result(existing)
+                        result["complemented"] = False
+                        return result
+                    self.logger.info(
+                        "Complementing mapper session %s for %s up to depth %s",
+                        existing.id, config.package_name, limits.max_depth,
+                    )
+                    return self._continue_session(repository, existing, target_max_depth=limits.max_depth, limits=limits, config=config, fresh=False)
 
         self.logger.info("Starting mapper for %s in %s mode", config.package_name, config.mode.value)
         self.navigation_context.prepare_fresh_app_launch(config.package_name)
@@ -65,24 +110,70 @@ class UiMapperService(MapperEngine):
             )
             mapper_session.status = MapperSessionStatus.RUNNING
             mapper_session.started_at = utc_now()
+            return self._continue_session(repository, mapper_session, target_max_depth=limits.max_depth, limits=limits, config=config, fresh=True)
 
-            state = {"actions_executed": 0, "screens_recorded": 0, "scrolls_used": 0, "revisited_screens": 0}
-            self._explore(repository, mapper_session.id, depth=0, state=state, max_depth=limits.max_depth, max_actions=limits.max_actions, max_scrolls=limits.max_scrolls, config_skip_dangerous_actions=config.skip_dangerous_actions)
+    def _continue_session(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        mapper_session: MapperSession,
+        *,
+        target_max_depth: int,
+        limits: MapperLimits,
+        config: MapperRunConfig,
+        fresh: bool,
+    ) -> dict[str, Any]:
+        if not fresh:
+            self.navigation_context.prepare_fresh_app_launch(config.package_name)
+            mapper_session.status = MapperSessionStatus.RUNNING
+            mapper_session.mode = config.mode
+            mapper_session.max_depth = target_max_depth
+            mapper_session.max_actions = max(mapper_session.max_actions, limits.max_actions)
+            mapper_session.max_scrolls = max(mapper_session.max_scrolls, limits.max_scrolls)
 
-            mapper_session.status = MapperSessionStatus.COMPLETED
-            mapper_session.finished_at = utc_now()
-            self.logger.info("Completed mapper session %s for %s", mapper_session.id, mapper_session.package_name)
-            return {
-                "session_id": mapper_session.id,
-                "package_name": mapper_session.package_name,
-                "mode": mapper_session.mode.value,
-                "screens_recorded": state["screens_recorded"],
-                "actions_executed": state["actions_executed"],
-                "scrolls_used": state["scrolls_used"],
-                "revisited_screens": state["revisited_screens"],
-                "status": mapper_session.status.value,
-                "reused": False,
-            }
+        state = self._load_state(repository, mapper_session.id)
+        visited_this_pass: set[int] = set()
+        self._explore(
+            repository,
+            mapper_session.id,
+            depth=0,
+            state=state,
+            visited_this_pass=visited_this_pass,
+            max_depth=target_max_depth,
+            max_actions=mapper_session.max_actions,
+            max_scrolls=mapper_session.max_scrolls,
+            config_skip_dangerous_actions=config.skip_dangerous_actions,
+        )
+
+        mapper_session.status = MapperSessionStatus.COMPLETED
+        mapper_session.finished_at = utc_now()
+        mapper_session.explored_up_to_depth = target_max_depth
+        self.logger.info(
+            "Completed mapper session %s for %s (explored_up_to_depth=%s)",
+            mapper_session.id, mapper_session.package_name, target_max_depth,
+        )
+        return {
+            "session_id": mapper_session.id,
+            "package_name": mapper_session.package_name,
+            "mode": mapper_session.mode.value,
+            "screens_recorded": state["screens_recorded"],
+            "actions_executed": state["actions_executed"],
+            "scrolls_used": state["scrolls_used"],
+            "revisited_screens": state["revisited_screens"],
+            "status": mapper_session.status.value,
+            "reused": False,
+            "complemented": not fresh,
+        }
+
+    @staticmethod
+    def _load_state(repository: SqlAlchemyMapperRepository, session_id: int) -> dict[str, int]:
+        screens = repository.list_screens(session_id)
+        actions = repository.list_actions(session_id)
+        return {
+            "screens_recorded": len(screens),
+            "actions_executed": sum(1 for action in actions if action.executed),
+            "scrolls_used": 0,
+            "revisited_screens": sum(1 for screen in screens if screen.visit_count > 1),
+        }
 
     @staticmethod
     def _reused_session_result(mapper_session: MapperSession) -> dict[str, Any]:
@@ -98,28 +189,43 @@ class UiMapperService(MapperEngine):
             "reused": True,
         }
 
-    def _explore(self, repository: SqlAlchemyMapperRepository, session_id: int, *, depth: int, state: dict[str, int], max_depth: int, max_actions: int, max_scrolls: int, config_skip_dangerous_actions: bool) -> int | None:
+    def _explore(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        *,
+        depth: int,
+        state: dict[str, int],
+        visited_this_pass: set[int],
+        max_depth: int,
+        max_actions: int,
+        max_scrolls: int,
+        config_skip_dangerous_actions: bool,
+    ) -> int | None:
         nodes = self.ui.dump_nodes()
         fingerprint = self.fingerprint_service.fingerprint(nodes)
         existing_screen = repository.find_screen_by_fingerprint(session_id, fingerprint)
+
         if existing_screen is not None:
             repository.increment_screen_visit_count(existing_screen.id)
             state["revisited_screens"] += 1
-            return existing_screen.id
-
-        screen = repository.create_screen(
-            session_id=session_id,
-            fingerprint=fingerprint,
-            screen_key=f"screen-{state['screens_recorded'] + 1}",
-            depth=depth,
-            ordinal=state["screens_recorded"],
-            metadata_json={"node_count": len(nodes)},
-        )
-        state["screens_recorded"] += 1
-
-        persisted_nodes = []
-        for index, node in enumerate(nodes):
-            persisted_nodes.append(
+            screen = existing_screen
+            if screen.id in visited_this_pass:
+                # cycle within this same traversal pass (e.g. an in-app back button): already
+                # being handled higher up this same call stack, stop here to avoid recursing forever
+                return screen.id
+            persisted_nodes = repository.get_screen(screen.id).nodes
+        else:
+            screen = repository.create_screen(
+                session_id=session_id,
+                fingerprint=fingerprint,
+                screen_key=f"screen-{state['screens_recorded'] + 1}",
+                depth=depth,
+                ordinal=state["screens_recorded"],
+                metadata_json={"node_count": len(nodes)},
+            )
+            state["screens_recorded"] += 1
+            persisted_nodes = [
                 repository.create_node(
                     screen_id=screen.id,
                     node_key=self._node_key(node, index),
@@ -137,9 +243,26 @@ class UiMapperService(MapperEngine):
                     long_clickable=bool(node.get("long_clickable", False)),
                     package_name=node.get("package_name"),
                 )
-            )
+                for index, node in enumerate(nodes)
+            ]
+
+        visited_this_pass.add(screen.id)
 
         if depth >= max_depth:
+            return screen.id
+
+        if existing_screen is not None and existing_screen.expanded:
+            # already fully processed in an earlier pass; only re-walk into it (via its own
+            # already-successful actions) to reach children that might still need expanding
+            for action in repository.list_actions(session_id, screen_id=screen.id, executed=True):
+                if not action.success or action.node_id is None:
+                    continue
+                node = repository.get_node(action.node_id)
+                if node is None or not node.bounds:
+                    continue
+                if self.ui.click_bounds(node.bounds):
+                    self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                    self.adb.press_back()
             return screen.id
 
         candidates = self._extract_candidates(nodes)
@@ -147,6 +270,18 @@ class UiMapperService(MapperEngine):
             if state["actions_executed"] >= max_actions:
                 break
             node_id = persisted_nodes[index].id if index < len(persisted_nodes) else None
+
+            existing_action = repository.find_action_by_key(session_id, screen.id, candidate.action_key)
+            if existing_action is not None:
+                # already tried in an earlier pass (e.g. resumed after a crash mid-screen);
+                # don't re-classify/re-record it, just replay it if it's known to lead somewhere
+                if existing_action.executed and existing_action.success and existing_action.node_id:
+                    existing_node = repository.get_node(existing_action.node_id)
+                    if existing_node and existing_node.bounds and self.ui.click_bounds(existing_node.bounds):
+                        self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                        self.adb.press_back()
+                continue
+
             safety = self.safety_service.classify(candidate.node, candidate.label)
             action = repository.create_action(
                 session_id=session_id,
@@ -177,7 +312,7 @@ class UiMapperService(MapperEngine):
             action.success = success
             state["actions_executed"] += 1
             if success:
-                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+                to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
@@ -195,10 +330,12 @@ class UiMapperService(MapperEngine):
                     result_type="failed_click",
                 )
 
+        repository.mark_screen_expanded(screen.id)
+
         if max_scrolls > 0 and state["scrolls_used"] < max_scrolls:
             self.ui.swipe_up()
             state["scrolls_used"] += 1
-            self._explore(repository, session_id, depth=depth, state=state, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
+            self._explore(repository, session_id, depth=depth, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, config_skip_dangerous_actions=config_skip_dangerous_actions)
 
         return screen.id
 

@@ -25,18 +25,24 @@ logger = get_logger(__name__)
 @router.post("/run", response_model=MapperRunResponse)
 def run_mapper(payload: MapperRunRequest):
     logger.info("POST /mapper/run package=%s mode=%s", payload.package_name, payload.mode)
+    if payload.override and payload.complement:
+        raise HTTPException(status_code=400, detail="override and complement cannot both be set")
     try:
         mode = MapperMode(payload.mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid mapper mode: {payload.mode}") from exc
-    result = get_mapper_engine().run(
-        MapperRunConfig(
-            package_name=payload.package_name,
-            mode=mode,
-            skip_dangerous_actions=payload.skip_dangerous_actions,
-            override=payload.override,
+    try:
+        result = get_mapper_engine().run(
+            MapperRunConfig(
+                package_name=payload.package_name,
+                mode=mode,
+                skip_dangerous_actions=payload.skip_dangerous_actions,
+                override=payload.override,
+                complement=payload.complement,
+            )
         )
-    )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return MapperRunResponse(**result)
 
 

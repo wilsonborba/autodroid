@@ -110,6 +110,34 @@ class SqlAlchemyMapperRepository:
         self.session.flush()
         return screen
 
+    def mark_screen_expanded(self, screen_id: int) -> MapperScreen:
+        screen = self.session.get(MapperScreen, screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        screen.expanded = True
+        self.session.flush()
+        return screen
+
+    def find_action_by_key(self, session_id: int, screen_id: int, action_key: str) -> MapperAction | None:
+        stmt = select(MapperAction).where(
+            MapperAction.session_id == session_id,
+            MapperAction.screen_id == screen_id,
+            MapperAction.action_key == action_key,
+        )
+        return self.session.scalar(stmt)
+
+    def get_resumable_session(self, package_name: str) -> MapperSession | None:
+        """Most recent session for a package that never reached a terminal status
+        (interrupted mid-run: process crashed, device dropped, etc)."""
+        stmt = (
+            select(MapperSession)
+            .options(selectinload(MapperSession.screens), selectinload(MapperSession.actions), selectinload(MapperSession.transitions))
+            .where(MapperSession.package_name == package_name, MapperSession.status == MapperSessionStatus.RUNNING)
+            .order_by(MapperSession.created_at.desc())
+            .limit(1)
+        )
+        return self.session.scalar(stmt)
+
     def list_screens(self, session_id: int) -> list[MapperScreen]:
         stmt = (
             select(MapperScreen)

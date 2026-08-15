@@ -36,3 +36,4 @@ class MapperRunConfig:
     mode: MapperMode
     skip_dangerous_actions: bool = True
     override: bool = False
+    complement: bool = False

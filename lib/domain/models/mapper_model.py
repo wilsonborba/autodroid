@@ -25,6 +25,7 @@ class MapperSession(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    explored_up_to_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     screens: Mapped[list[MapperScreen]] = relationship(back_populates="session", cascade="all, delete-orphan")
@@ -44,6 +45,7 @@ class MapperScreen(Base):
     screenshot_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     raw_hierarchy_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     visit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    expanded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 

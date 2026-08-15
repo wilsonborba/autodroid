@@ -178,12 +178,18 @@ def run_mapper(
     mode: str = "light",
     skip_dangerous_actions: bool = True,
     override: bool = typer.Option(False, "--override", help="Force remapping even if a completed session already exists"),
+    complement: bool = typer.Option(False, "--complement", help="Extend the existing session up to this mode's depth instead of skipping or remapping from scratch"),
 ) -> None:
+    if override and complement:
+        raise typer.BadParameter("--override and --complement cannot both be set")
     try:
         mapper_mode = MapperMode(mode)
     except ValueError as exc:
         raise typer.BadParameter(f"Invalid mapper mode: {mode}") from exc
-    result = UiMapperService(get_settings()).run(MapperRunConfig(package_name=package_name, mode=mapper_mode, skip_dangerous_actions=skip_dangerous_actions, override=override))
+    try:
+        result = UiMapperService(get_settings()).run(MapperRunConfig(package_name=package_name, mode=mapper_mode, skip_dangerous_actions=skip_dangerous_actions, override=override, complement=complement))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(JsonOutput.render(result))
 
 
