@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from lib.core.logs import get_logger
 from lib.core.utils.json_utils import write_json
 from lib.dal.local.database import session_scope
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
@@ -10,6 +11,9 @@ from lib.domain.services.mapper_export_service import MapperExportService
 
 
 class LocalMapperExportService(MapperExportService):
+    def __init__(self) -> None:
+        self.logger = get_logger(__name__)
+
     def export_session(self, session_id: int, output_dir: Path) -> Path:
         with session_scope() as session:
             repository = SqlAlchemyMapperRepository(session)
@@ -25,6 +29,7 @@ class LocalMapperExportService(MapperExportService):
             for screen in mapper_session.screens:
                 write_json(screens_dir / f"screen_{screen.id}.json", self._screen_payload(screen))
 
+            self.logger.info("Exporting mapper session %s to %s", session_id, base_dir)
             write_json(
                 base_dir / "index.json",
                 {

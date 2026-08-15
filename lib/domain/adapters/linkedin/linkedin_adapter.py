@@ -4,6 +4,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
+from lib.core.logs import get_logger
 from lib.core.settings import Settings
 from lib.core.utils.json_utils import write_json
 from lib.dal.remote.adb_adapter import AdbAdapter
@@ -14,6 +15,7 @@ from lib.domain.services.navigation_context_service import NavigationContextServ
 
 class LinkedInAdapter:
     def __init__(self, settings: Settings) -> None:
+        self.logger = get_logger(__name__)
         self.settings = settings
         self.adb = AdbAdapter(settings.android_serial)
         self.ui = UiAutomatorAdapter(settings.android_serial)
@@ -21,6 +23,7 @@ class LinkedInAdapter:
         self.navigation_context = NavigationContextService(self.adb)
 
     def extract_profile_basic(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.logger.info("Starting LinkedIn profile extraction")
         self._ensure_device_ready()
         resume_context = self.navigation_context.load_resume_context(payload)
         if self.navigation_context.can_resume(resume_context):
@@ -45,6 +48,7 @@ class LinkedInAdapter:
             screenshot_path = self.ui.screenshot(screenshot_dir / "linkedin_profile_basic.png")
             ocr_lines = self.ocr.extract_lines(screenshot_path)
 
+        self.logger.info("LinkedIn profile entrypoint opened=%s", profile_opened)
         result = {
             "profile_opened": profile_opened,
             "name": self._guess_name(visible_texts or ocr_lines),

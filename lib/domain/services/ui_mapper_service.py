@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from lib.core.logs import get_logger
 from lib.core.settings import Settings
 from lib.core.utils.clock import utc_now
 from lib.dal.local.database import session_scope
@@ -27,6 +28,7 @@ class MapperActionCandidate:
 
 class UiMapperService(MapperEngine):
     def __init__(self, settings: Settings) -> None:
+        self.logger = get_logger(__name__)
         self.settings = settings
         self.adb = AdbAdapter(settings.android_serial)
         self.ui = UiAutomatorAdapter(settings.android_serial)
@@ -37,6 +39,7 @@ class UiMapperService(MapperEngine):
 
     def run(self, config: MapperRunConfig) -> dict[str, Any]:
         limits = self.mode_service.get_limits(config.mode)
+        self.logger.info("Starting mapper for %s in %s mode", config.package_name, config.mode.value)
         self.navigation_context.prepare_fresh_app_launch(config.package_name)
 
         with session_scope() as session:
@@ -58,6 +61,7 @@ class UiMapperService(MapperEngine):
 
             mapper_session.status = MapperSessionStatus.COMPLETED
             mapper_session.finished_at = utc_now()
+            self.logger.info("Completed mapper session %s for %s", mapper_session.id, mapper_session.package_name)
             return {
                 "session_id": mapper_session.id,
                 "package_name": mapper_session.package_name,
@@ -130,6 +134,7 @@ class UiMapperService(MapperEngine):
                 executed=False,
             )
             if safety == MapperActionSafety.DANGEROUS and config_skip_dangerous_actions:
+                self.logger.warning("Blocked dangerous action %r on screen %s", candidate.label, screen.id)
                 action.skipped_reason = "dangerous_action_blocked"
                 repository.create_transition(
                     session_id=session_id,

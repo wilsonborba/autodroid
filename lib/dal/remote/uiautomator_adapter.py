@@ -5,6 +5,8 @@ import xml.etree.ElementTree as et
 from pathlib import Path
 from typing import Any
 
+from lib.core.logs import get_logger
+
 try:
     import uiautomator2 as u2
 except Exception:  # pragma: no cover - optional until runtime
@@ -15,6 +17,7 @@ class UiAutomatorAdapter:
     def __init__(self, serial: str) -> None:
         self.serial = serial
         self._device = None
+        self.logger = get_logger(__name__)
 
     @property
     def device(self):
@@ -25,6 +28,7 @@ class UiAutomatorAdapter:
         return self._device
 
     def app_start(self, package_name: str) -> None:
+        self.logger.debug("Starting app %s", package_name)
         self.device.app_start(package_name, stop=False)
         time.sleep(3)
 
@@ -58,6 +62,7 @@ class UiAutomatorAdapter:
         return False
 
     def dump_nodes(self) -> list[dict[str, Any]]:
+        self.logger.debug("Dumping UI hierarchy")
         hierarchy = self.device.dump_hierarchy(compressed=False)
         root = et.fromstring(hierarchy)
         nodes: list[dict[str, Any]] = []
@@ -79,6 +84,7 @@ class UiAutomatorAdapter:
             }
             if item["text"] or item["content_desc"] or item["resource_id"]:
                 nodes.append(item)
+        self.logger.debug("Dumped %s UI nodes", len(nodes))
         return nodes
 
     def swipe_up(self) -> None:
@@ -88,6 +94,7 @@ class UiAutomatorAdapter:
     def screenshot(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.device.screenshot(str(path))
+        self.logger.debug("Saved screenshot to %s", path)
         return path
 
     def click_bounds(self, bounds: str) -> bool:
@@ -96,6 +103,7 @@ class UiAutomatorAdapter:
             x1, y1 = [int(value) for value in left_top.split(',')]
             x2, y2 = [int(value) for value in right_bottom.split(',')]
         except Exception:
+            self.logger.debug("Unable to parse click bounds: %s", bounds)
             return False
         self.device.click((x1 + x2) // 2, (y1 + y2) // 2)
         time.sleep(1)

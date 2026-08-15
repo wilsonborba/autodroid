@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from lib.core.logs import get_logger
 from lib.presentation.api.dependencies import get_session, get_settings
 from lib.domain.services.job_queue_service import JobQueueService
 from lib.domain.services.worker_service import WorkerService
 from lib.presentation.api.schemas.job_schemas import CreateJobRequest, JobResponse, ReprioritizeJobRequest, WorkerResponse
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 
 @router.get("/health")
@@ -17,6 +19,7 @@ def healthcheck() -> dict[str, str]:
 
 @router.post("/jobs", response_model=JobResponse)
 def create_job(payload: CreateJobRequest):
+    logger.info("POST /jobs job_type=%s adapter=%s", payload.job_type, payload.adapter_name)
     settings = get_settings()
     with get_session() as session:
         queue = JobQueueService(session, settings.timezone)
@@ -56,24 +59,28 @@ def get_job(job_id: int):
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobResponse)
 def cancel_job(job_id: int):
+    logger.info("POST /jobs/%s/cancel", job_id)
     settings = get_settings()
     with get_session() as session:
         queue = JobQueueService(session, settings.timezone)
         try:
             job = queue.cancel_job(job_id)
         except ValueError as exc:
+            logger.warning("Cancel failed for job %s: %s", job_id, exc)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return JobResponse.model_validate(job, from_attributes=True)
 
 
 @router.post("/jobs/{job_id}/reprioritize", response_model=JobResponse)
 def reprioritize_job(job_id: int, payload: ReprioritizeJobRequest):
+    logger.info("POST /jobs/%s/reprioritize priority=%s", job_id, payload.priority)
     settings = get_settings()
     with get_session() as session:
         queue = JobQueueService(session, settings.timezone)
         try:
             job = queue.reprioritize_job(job_id, payload.priority)
         except ValueError as exc:
+            logger.warning("Reprioritize failed for job %s: %s", job_id, exc)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return JobResponse.model_validate(job, from_attributes=True)
 
