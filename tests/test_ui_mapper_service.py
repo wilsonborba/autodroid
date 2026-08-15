@@ -6,7 +6,7 @@ from sqlalchemy import text
 from lib.core.logs import get_logger
 from lib.dal.local.database import SessionLocal
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
-from lib.domain.models.mapper_types import MapperMode, MapperRunConfig, MapperSessionStatus
+from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
 from lib.domain.services.mapper_safety_service import MapperSafetyService
@@ -41,6 +41,7 @@ _TEST_PACKAGE_NAMES = (
     "com.fresh.testapp", "com.dangerous.testapp", "com.reuse.testapp", "com.override.testapp",
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
+    "com.scrollbudget.testapp", "com.replay.testapp",
 )
 
 
@@ -466,3 +467,76 @@ def test_peek_candidate_catalogs_revealed_screen_without_exploring_it() -> None:
         screens = repository.list_screens(result["session_id"])
         compose_screen = screens[1]
         assert repository.list_actions(result["session_id"], screen_id=compose_screen.id) == []
+
+
+def _scrollable_dump(section_text: str) -> list[dict]:
+    return [
+        {"resource_id": "scroll_container", "text": "", "content_desc": "", "class_name": "ScrollView", "bounds": "[0,0][100,800]", "clickable": False, "enabled": True, "scrollable": True, "package_name": "com.scrollbudget.testapp"},
+        {"resource_id": "section_text", "text": section_text, "content_desc": "", "class_name": "TextView", "bounds": "[0,50][100,100]", "clickable": False, "enabled": True, "package_name": "com.scrollbudget.testapp"},
+    ]
+
+
+def test_scroll_budget_is_per_screen_not_shared_across_the_session() -> None:
+    # issue #33: a root screen that already used up the whole session's scroll counter must not
+    # leave every screen mapped afterward with zero scrolls of its own
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.scrollbudget.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=3)
+        screen = repository.create_screen(session_id=mapper_session.id, fingerprint="root", screen_key="root", depth=0, ordinal=0)
+        session.commit()
+        screen_id = screen.id
+
+    service = build_service([])
+    service.ui.dumps = [_scrollable_dump(f"content-{i}") for i in range(5)]
+    state = {"screens_recorded": 1, "actions_executed": 0, "scrolls_used": 3, "revisited_screens": 0}  # 3 already "spent" elsewhere this session
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screen = repository.get_screen(screen_id)
+        service._scroll_and_catalog(
+            repository, screen, _scrollable_dump("content-initial"), {},
+            max_scrolls=3, repeat_signature_threshold=100,
+            package_name="com.scrollbudget.testapp", ancestor_bounds=[], state=state,
+        )
+        session.commit()
+
+    assert service.ui.swipes == 3  # got its own full 3 scrolls despite the session counter starting at 3
+    assert state["scrolls_used"] == 6  # 3 pre-existing + 3 from this screen, still tracked for reporting
+
+
+def test_replay_target_skips_dead_ends_and_already_expanded_destinations() -> None:
+    # issue #33: replaying every recorded action unconditionally every time a screen is revisited
+    # (including ones that left the app or lead to an already fully-explored screen) is what a
+    # user reported as an endless loop; only a destination still worth reaching should be replayed
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.replay.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        screen_a = repository.create_screen(session_id=mapper_session.id, fingerprint="a", screen_key="a", depth=0, ordinal=0)
+        screen_b_expanded = repository.create_screen(session_id=mapper_session.id, fingerprint="b", screen_key="b", depth=1, ordinal=1)
+        repository.mark_screen_expanded(screen_b_expanded.id)
+        screen_c_open = repository.create_screen(session_id=mapper_session.id, fingerprint="c", screen_key="c", depth=1, ordinal=2)
+
+        def make_click_action(label: str, bounds: str):
+            node = repository.create_node(screen_id=screen_a.id, node_key=f"node-{label}", text=label, clickable=True, bounds=bounds)
+            return repository.create_action(session_id=mapper_session.id, screen_id=screen_a.id, node_id=node.id, action_key=f"click:{label}", action_type="click", label=label, safety=MapperActionSafety.SAFE, executed=True, success=True)
+
+        action_to_expanded = make_click_action("ToExpanded", "[0,0][10,10]")
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=screen_a.id, action_id=action_to_expanded.id, to_screen_id=screen_b_expanded.id, result_type="clicked")
+
+        action_to_open = make_click_action("ToOpen", "[0,20][10,30]")
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=screen_a.id, action_id=action_to_open.id, to_screen_id=screen_c_open.id, result_type="clicked")
+
+        action_left_app = make_click_action("LeftApp", "[0,40][10,50]")
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=screen_a.id, action_id=action_left_app.id, to_screen_id=None, result_type="left_app")
+
+        session.commit()
+        action_to_expanded_id, action_to_open_id, action_left_app_id = action_to_expanded.id, action_to_open.id, action_left_app.id
+
+    service = build_service([])
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        assert service._replay_target(repository, repository.get_action(action_to_expanded_id)) is None
+        assert service._replay_target(repository, repository.get_action(action_left_app_id)) is None
+        target = service._replay_target(repository, repository.get_action(action_to_open_id))
+        assert target is not None
+        assert target.bounds == "[0,20][10,30]"
