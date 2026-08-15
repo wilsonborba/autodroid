@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import time
+from datetime import time as time_of_day
 from typing import Any
 
 from lib.core.logs import get_logger
 from lib.core.settings import Settings
+from lib.core.utils.clock import local_now
 from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.ocr_adapter import OcrAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep
 from lib.domain.models.mapper_types import MapperActionSafety
+from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_safety_service import MapperSafetyService
 
 
@@ -18,6 +21,15 @@ class MapperFlowExecutionService:
 
     Reads step definitions (already persisted), does not persist anything new.
     Runtime visibility is the job of structured logging (issue #17), not this service.
+
+    A step whose `params_json` has a `repeat` descriptor runs in a controlled loop instead of
+    once (issue #22): scroll during mapping is already capped by `MapperModeService`, but scroll
+    during a Flow's real data extraction (e.g. paging through a whole feed) is a different
+    problem with a different, usually much higher, bound. `repeat` supports `max_iterations`,
+    `max_duration_seconds`, and `execution_window_start`/`execution_window_end` (same concept as
+    `Job.execution_window_*`, #3), whichever is hit first wins. Regardless of any configured
+    limit, the loop also stops the moment the screen stops changing (same fingerprint twice in a
+    row), since there's no point repeating a step against content that isn't moving anymore.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -27,6 +39,7 @@ class MapperFlowExecutionService:
         self.ui = UiAutomatorAdapter(settings.android_serial)
         self.ocr = OcrAdapter(settings.ocr_language)
         self.safety_service = MapperSafetyService()
+        self.fingerprint_service = MapperFingerprintService()
         self._handlers = {
             "click": self._execute_click,
             "click_first_match": self._execute_click_first_match,
@@ -53,6 +66,64 @@ class MapperFlowExecutionService:
         }
 
     def run_step(self, step: MapperFlowStep, *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
+        repeat_config = (step.params_json or {}).get("repeat")
+        if repeat_config:
+            return self._run_step_repeated(step, repeat_config, skip_dangerous_actions=skip_dangerous_actions)
+        return self._run_step_once(step, skip_dangerous_actions=skip_dangerous_actions)
+
+    def _run_step_repeated(self, step: MapperFlowStep, repeat_config: dict[str, Any], *, skip_dangerous_actions: bool) -> dict[str, Any]:
+        max_iterations = repeat_config.get("max_iterations")
+        max_duration_seconds = repeat_config.get("max_duration_seconds")
+        window_start = repeat_config.get("execution_window_start")
+        window_end = repeat_config.get("execution_window_end")
+
+        started_at = time.monotonic()
+        iteration = 0
+        last_fingerprint: str | None = None
+        stop_reason: str | None = None
+        # covers the edge case where the very first limit check already stops the loop (e.g. an
+        # execution window that isn't open yet): the step never actually ran, but the result
+        # still needs the fields callers/the API schema expect
+        last_result: dict[str, Any] = {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": None}
+
+        while True:
+            if max_iterations is not None and iteration >= max_iterations:
+                stop_reason = "max_iterations"
+                break
+            if max_duration_seconds is not None and (time.monotonic() - started_at) >= max_duration_seconds:
+                stop_reason = "max_duration_seconds"
+                break
+            if window_start and window_end and not self._within_execution_window(window_start, window_end):
+                stop_reason = "execution_window"
+                break
+
+            last_result = self._run_step_once(step, skip_dangerous_actions=skip_dangerous_actions)
+            iteration += 1
+
+            fingerprint = self._current_fingerprint()
+            if last_fingerprint is not None and fingerprint == last_fingerprint:
+                stop_reason = "no_new_content"
+                break
+            last_fingerprint = fingerprint
+
+        self.logger.info(
+            "Repeated flow step %s (%s) %s time(s), stopped: %s",
+            step.id, step.action_type, iteration, stop_reason,
+        )
+        return {**last_result, "iterations_run": iteration, "stop_reason": stop_reason}
+
+    def _current_fingerprint(self) -> str:
+        return self.fingerprint_service.fingerprint(self.ui.dump_nodes())
+
+    def _within_execution_window(self, window_start: str, window_end: str) -> bool:
+        start = time_of_day.fromisoformat(window_start)
+        end = time_of_day.fromisoformat(window_end)
+        current = local_now(self.settings.timezone).time().replace(microsecond=0)
+        if start <= end:
+            return start <= current <= end
+        return current >= start or current <= end
+
+    def _run_step_once(self, step: MapperFlowStep, *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
         # steps are shared/reusable (issue #23), they no longer carry a flow-specific position,
         # so results are identified by step_id (globally stable) instead of a per-flow ordinal
         label = self._describe_step(step)
