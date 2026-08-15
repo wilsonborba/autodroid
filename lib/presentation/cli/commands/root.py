@@ -337,6 +337,47 @@ def latest_mapper_session(package_name: str, as_json: bool = False) -> None:
         typer.echo(str(payload))
 
 
+@mapper_app.command("remap-candidates")
+def remap_candidates(threshold: int | None = None, as_json: bool = False) -> None:
+    settings = get_settings()
+    if not settings.mapper_auto_remap_enabled:
+        typer.echo("Auto-remap is disabled (AUTODROID_MAPPER_AUTO_REMAP_ENABLED=false); failures are still being recorded, nothing is actionable until it's turned on.")
+        return
+    resolved_threshold = threshold if threshold is not None else settings.mapper_auto_remap_threshold
+    with get_session() as session:
+        candidates = SqlAlchemyMapperFlowRepository(session).list_remap_candidates(resolved_threshold)
+        if as_json:
+            typer.echo(JsonOutput.render({"candidates": [{"package_name": name, "unresolved_failure_count": count} for name, count in candidates]}))
+            return
+        for package_name, count in candidates:
+            typer.echo(f"{package_name}: {count} unresolved failure(s)")
+
+
+@mapper_app.command("remap")
+def remap_apps(
+    package_names: list[str] = typer.Argument(None, help="Package names to remap"),
+    all_candidates: bool = typer.Option(False, "--all", help="Remap every current candidate"),
+    strategy: str = typer.Option("override", help="override or complement"),
+    mode: str = typer.Option("medium"),
+) -> None:
+    settings = get_settings()
+    with get_session() as session:
+        if all_candidates:
+            candidates = SqlAlchemyMapperFlowRepository(session).list_remap_candidates(settings.mapper_auto_remap_threshold)
+            resolved_names = [name for name, _ in candidates]
+        else:
+            resolved_names = list(package_names or [])
+        if not resolved_names:
+            raise typer.BadParameter("No package selected: pass package names or --all with existing candidates")
+
+        queue = JobQueueService(session, settings.timezone)
+        queued = []
+        for package_name in resolved_names:
+            job = queue.create_job(job_type="mapper.remap", adapter_name="mapper", payload={"package_name": package_name, "strategy": strategy, "mode": mode})
+            queued.append({"package_name": package_name, "job_id": job.id})
+        typer.echo(JsonOutput.render({"queued": queued}))
+
+
 def _flow_summary_payload(flow) -> dict:
     return {
         "id": flow.id,

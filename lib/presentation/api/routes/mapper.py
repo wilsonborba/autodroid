@@ -5,12 +5,18 @@ from fastapi import APIRouter, HTTPException
 from lib.core.logs import get_logger
 from lib.presentation.api.dependencies import get_mapper_engine, get_mapper_export_service, get_session, get_settings
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
+from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
+from lib.domain.services.job_queue_service import JobQueueService
 from lib.presentation.api.schemas.mapper_schemas import (
     MapperActionResponse,
     MapperExportResponse,
     MapperGraphResponse,
     MapperNodeResponse,
+    MapperRemapCandidateResponse,
+    MapperRemapJobResponse,
+    MapperRemapRequest,
+    MapperRemapResponse,
     MapperRunRequest,
     MapperRunResponse,
     MapperScreenResponse,
@@ -179,3 +185,42 @@ def get_latest_mapper_session(package_name: str):
         if mapper_session is None:
             raise HTTPException(status_code=404, detail=f"No completed mapper session found for {package_name}")
         return MapperSessionResponse.model_validate(mapper_session, from_attributes=True)
+
+
+@router.get("/apps/remap-candidates", response_model=list[MapperRemapCandidateResponse])
+def list_remap_candidates(threshold: int | None = None):
+    settings = get_settings()
+    if not settings.mapper_auto_remap_enabled:
+        # opt-in (issue #21): with auto-remap disabled, failures still accumulate in the
+        # background, but nothing surfaces as "actionable" until it's turned on
+        return []
+    resolved_threshold = threshold if threshold is not None else settings.mapper_auto_remap_threshold
+    with get_session() as session:
+        repository = SqlAlchemyMapperFlowRepository(session)
+        candidates = repository.list_remap_candidates(resolved_threshold)
+        return [MapperRemapCandidateResponse(package_name=package_name, unresolved_failure_count=count) for package_name, count in candidates]
+
+
+@router.post("/apps/remap", response_model=MapperRemapResponse)
+def remap_apps(payload: MapperRemapRequest):
+    logger.info("POST /mapper/apps/remap package_names=%s all=%s strategy=%s", payload.package_names, payload.all, payload.strategy)
+    settings = get_settings()
+    with get_session() as session:
+        if payload.all:
+            candidates = SqlAlchemyMapperFlowRepository(session).list_remap_candidates(settings.mapper_auto_remap_threshold)
+            package_names = [package_name for package_name, _ in candidates]
+        else:
+            package_names = payload.package_names or []
+        if not package_names:
+            raise HTTPException(status_code=400, detail="No package selected: provide 'package_names' or 'all=true' with existing candidates")
+
+        queue = JobQueueService(session, settings.timezone)
+        queued = []
+        for package_name in package_names:
+            job = queue.create_job(
+                job_type="mapper.remap",
+                adapter_name="mapper",
+                payload={"package_name": package_name, "strategy": payload.strategy, "mode": payload.mode},
+            )
+            queued.append(MapperRemapJobResponse(package_name=package_name, job_id=job.id))
+        return MapperRemapResponse(queued=queued)

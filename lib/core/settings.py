@@ -18,6 +18,8 @@ class Settings:
     android_serial: str
     linkedin_package_name: str
     ocr_language: str
+    mapper_auto_remap_enabled: bool
+    mapper_auto_remap_threshold: int
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -37,4 +39,6 @@ def load_settings() -> Settings:
         android_serial=os.getenv("ANDROID_SERIAL", "127.0.0.1:5555"),
         linkedin_package_name=os.getenv("LINKEDIN_PACKAGE_NAME", "com.linkedin.android"),
         ocr_language=os.getenv("AUTODROID_OCR_LANGUAGE", "en"),
+        mapper_auto_remap_enabled=os.getenv("AUTODROID_MAPPER_AUTO_REMAP_ENABLED", "false").lower() == "true",
+        mapper_auto_remap_threshold=int(os.getenv("AUTODROID_MAPPER_AUTO_REMAP_THRESHOLD", "3")),
     )

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from lib.core.utils.clock import utc_now
 from lib.dal.local.database import Base
-from lib.domain.models.mapper_types import MapperActionSafety
+from lib.domain.models.mapper_types import MapperActionSafety, MapperFlowFailureType
 
 
 class MapperFlow(Base):
@@ -65,3 +65,20 @@ class MapperFlowStepUsage(Base):
 
     flow: Mapped[MapperFlow] = relationship(back_populates="step_usages")
     step: Mapped[MapperFlowStep] = relationship(back_populates="usages")
+
+
+class MapperFlowFailure(Base):
+    """An interaction failure (issue #21): the map said one thing, the real app said another.
+    Not a log, not an execution-history table (#18 deliberately has neither); this exists only
+    to feed the override/complement decision (#19/#20), so only failures are recorded here."""
+
+    __tablename__ = "mapper_flow_failures"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    flow_id: Mapped[int | None] = mapped_column(ForeignKey("mapper_flows.id", ondelete="SET NULL"), nullable=True)
+    step_id: Mapped[int | None] = mapped_column(ForeignKey("mapper_flow_steps.id", ondelete="SET NULL"), nullable=True)
+    package_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    failure_type: Mapped[MapperFlowFailureType] = mapped_column(SqlEnum(MapperFlowFailureType, name="mapper_flow_failure_type"), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

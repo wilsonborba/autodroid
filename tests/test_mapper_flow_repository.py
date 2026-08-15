@@ -14,6 +14,7 @@ def _clean_flows():
     # unique (package_name, name) constraint, so re-running these tests would otherwise collide
     # with rows left behind by a previous run.
     with SessionLocal() as session:
+        session.execute(text("DELETE FROM mapper_flow_failures"))
         session.execute(text("DELETE FROM mapper_flow_step_usages"))
         session.execute(text("DELETE FROM mapper_flow_steps"))
         session.execute(text("DELETE FROM mapper_flows"))
@@ -175,3 +176,44 @@ def test_find_step_by_source_action_dedupes() -> None:
         assert found is not None
         assert found.id == step_id
         assert repository.find_step_by_source_action("com.other.testapp", 42) is None
+
+
+def test_record_failure_and_list_remap_candidates_respects_threshold() -> None:
+    from lib.domain.models.mapper_types import MapperFlowFailureType
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperFlowRepository(session)
+        for _ in range(3):
+            repository.record_failure(package_name="com.threshold.testapp", failure_type=MapperFlowFailureType.SELECTOR_NOT_FOUND)
+        repository.record_failure(package_name="com.below.testapp", failure_type=MapperFlowFailureType.SELECTOR_NOT_FOUND)
+        session.commit()
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperFlowRepository(session)
+        candidates = repository.list_remap_candidates(threshold=3)
+        package_names = [name for name, _ in candidates]
+        assert "com.threshold.testapp" in package_names
+        assert "com.below.testapp" not in package_names
+        count = dict(candidates)["com.threshold.testapp"]
+        assert count == 3
+
+
+def test_resolve_failures_for_package_excludes_them_from_future_candidates() -> None:
+    from lib.domain.models.mapper_types import MapperFlowFailureType
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperFlowRepository(session)
+        for _ in range(3):
+            repository.record_failure(package_name="com.resolve.testapp", failure_type=MapperFlowFailureType.CLICK_FAILED)
+        session.commit()
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperFlowRepository(session)
+        resolved_count = repository.resolve_failures_for_package("com.resolve.testapp")
+        session.commit()
+        assert resolved_count == 3
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperFlowRepository(session)
+        candidates = repository.list_remap_candidates(threshold=1)
+        assert "com.resolve.testapp" not in [name for name, _ in candidates]

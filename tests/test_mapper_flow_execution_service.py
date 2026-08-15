@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep
+from sqlalchemy import select
+
+from lib.dal.local.database import SessionLocal
+from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowFailure, MapperFlowStep
 from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
+
+
+def _failures_for(package_name: str) -> list[MapperFlowFailure]:
+    with SessionLocal() as session:
+        return list(session.scalars(select(MapperFlowFailure).where(MapperFlowFailure.package_name == package_name)))
 
 
 class FakeUi:
@@ -264,3 +272,47 @@ def test_step_without_repeat_config_runs_exactly_once() -> None:
 
     assert "iterations_run" not in result
     assert service.ui.swipes == 1
+
+
+def test_click_selector_not_found_records_interaction_failure() -> None:
+    service = build_service()
+    service.ui.exact_result = False
+    step = make_step(package_name="com.failure1.testapp", action_type="click", selector_json={"candidates": ["Ghost Button"]})
+
+    result = service.run_step(step, flow_id=7)
+
+    assert result["success"] is False
+    failures = _failures_for("com.failure1.testapp")
+    assert len(failures) == 1
+    assert failures[0].failure_type.value == "selector_not_found"
+    assert failures[0].flow_id == 7
+    assert failures[0].resolved_at is None
+
+
+def test_unsupported_action_type_records_failure() -> None:
+    service = build_service()
+    step = make_step(package_name="com.failure2.testapp", action_type="teleport", selector_json={})
+
+    service.run_step(step)
+
+    failures = _failures_for("com.failure2.testapp")
+    assert len(failures) == 1
+    assert failures[0].failure_type.value == "unsupported_action_type"
+
+
+def test_successful_step_does_not_record_a_failure() -> None:
+    service = build_service()
+    step = make_step(package_name="com.failure3.testapp", action_type="click", selector_json={"candidates": ["Profile"]})
+
+    service.run_step(step)
+
+    assert _failures_for("com.failure3.testapp") == []
+
+
+def test_dangerous_action_blocked_does_not_record_a_failure() -> None:
+    service = build_service()
+    step = make_step(package_name="com.failure4.testapp", action_type="click", selector_json={"candidates": ["Delete account"]})
+
+    service.run_step(step)
+
+    assert _failures_for("com.failure4.testapp") == []

@@ -7,11 +7,13 @@ from typing import Any
 from lib.core.logs import get_logger
 from lib.core.settings import Settings
 from lib.core.utils.clock import local_now
+from lib.dal.local.database import session_scope
+from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.ocr_adapter import OcrAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep
-from lib.domain.models.mapper_types import MapperActionSafety
+from lib.domain.models.mapper_types import MapperActionSafety, MapperFlowFailureType
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_safety_service import MapperSafetyService
 
@@ -56,7 +58,7 @@ class MapperFlowExecutionService:
         several flows, so ordering/membership is resolved by the caller via
         `SqlAlchemyMapperFlowRepository.ordered_steps`, not derived from `flow` itself)."""
         self.logger.info("Running flow %s (%s) with %s steps", flow.id, flow.name, len(steps))
-        results = [self.run_step(step, skip_dangerous_actions=skip_dangerous_actions) for step in steps]
+        results = [self.run_step(step, flow_id=flow.id, skip_dangerous_actions=skip_dangerous_actions) for step in steps]
         self.logger.info("Finished flow %s (%s)", flow.id, flow.name)
         return {
             "flow_id": flow.id,
@@ -65,13 +67,13 @@ class MapperFlowExecutionService:
             "steps": results,
         }
 
-    def run_step(self, step: MapperFlowStep, *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
+    def run_step(self, step: MapperFlowStep, *, flow_id: int | None = None, skip_dangerous_actions: bool = True) -> dict[str, Any]:
         repeat_config = (step.params_json or {}).get("repeat")
         if repeat_config:
-            return self._run_step_repeated(step, repeat_config, skip_dangerous_actions=skip_dangerous_actions)
-        return self._run_step_once(step, skip_dangerous_actions=skip_dangerous_actions)
+            return self._run_step_repeated(step, repeat_config, flow_id=flow_id, skip_dangerous_actions=skip_dangerous_actions)
+        return self._run_step_once(step, flow_id=flow_id, skip_dangerous_actions=skip_dangerous_actions)
 
-    def _run_step_repeated(self, step: MapperFlowStep, repeat_config: dict[str, Any], *, skip_dangerous_actions: bool) -> dict[str, Any]:
+    def _run_step_repeated(self, step: MapperFlowStep, repeat_config: dict[str, Any], *, flow_id: int | None, skip_dangerous_actions: bool) -> dict[str, Any]:
         max_iterations = repeat_config.get("max_iterations")
         max_duration_seconds = repeat_config.get("max_duration_seconds")
         window_start = repeat_config.get("execution_window_start")
@@ -97,7 +99,7 @@ class MapperFlowExecutionService:
                 stop_reason = "execution_window"
                 break
 
-            last_result = self._run_step_once(step, skip_dangerous_actions=skip_dangerous_actions)
+            last_result = self._run_step_once(step, flow_id=flow_id, skip_dangerous_actions=skip_dangerous_actions)
             iteration += 1
 
             fingerprint = self._current_fingerprint()
@@ -123,7 +125,7 @@ class MapperFlowExecutionService:
             return start <= current <= end
         return current >= start or current <= end
 
-    def _run_step_once(self, step: MapperFlowStep, *, skip_dangerous_actions: bool = True) -> dict[str, Any]:
+    def _run_step_once(self, step: MapperFlowStep, *, flow_id: int | None = None, skip_dangerous_actions: bool = True) -> dict[str, Any]:
         # steps are shared/reusable (issue #23), they no longer carry a flow-specific position,
         # so results are identified by step_id (globally stable) instead of a per-flow ordinal
         label = self._describe_step(step)
@@ -136,16 +138,35 @@ class MapperFlowExecutionService:
         handler = self._handlers.get(step.action_type)
         if handler is None:
             self.logger.error("Unsupported flow step action_type: %s", step.action_type)
+            self._record_failure(step, flow_id, MapperFlowFailureType.UNSUPPORTED_ACTION_TYPE, f"action_type={step.action_type!r}")
             return {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": "unsupported_action_type"}
 
         try:
             outcome = handler(step)
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller as a failed step, not raised
             self.logger.error("Flow step %s (%s) failed: %s", step.id, step.action_type, exc)
+            self._record_failure(step, flow_id, MapperFlowFailureType.EXCEPTION, str(exc))
             return {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": None, "error": str(exc)}
 
         self.logger.info("Executed flow step %s (%s) success=%s", step.id, step.action_type, outcome.get("success"))
+        if outcome.get("success") is False:
+            failure_type = MapperFlowFailureType.SELECTOR_NOT_FOUND if step.action_type in ("click", "click_first_match") else MapperFlowFailureType.CLICK_FAILED
+            self._record_failure(step, flow_id, failure_type, f"selector={step.selector_json!r}")
         return {"step_id": step.id, "action_type": step.action_type, "skipped_reason": None, **outcome}
+
+    def _record_failure(self, step: MapperFlowStep, flow_id: int | None, failure_type: MapperFlowFailureType, detail: str | None) -> None:
+        try:
+            with session_scope() as session:
+                SqlAlchemyMapperFlowRepository(session).record_failure(
+                    package_name=step.package_name,
+                    failure_type=failure_type,
+                    flow_id=flow_id,
+                    step_id=step.id or None,
+                    detail=detail,
+                )
+            self.logger.warning("Recorded interaction failure for %s: %s (%s)", step.package_name, failure_type.value, detail)
+        except Exception:  # noqa: BLE001 - recording the failure must never break execution itself
+            self.logger.exception("Failed to record mapper flow failure for step %s", step.id)
 
     def _describe_step(self, step: MapperFlowStep) -> str:
         selector = step.selector_json or {}
