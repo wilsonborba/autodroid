@@ -7,6 +7,7 @@ from croniter import croniter
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session, selectinload
 
+from lib.core.logs import get_logger
 from lib.core.utils.clock import local_now, utc_now
 from lib.domain.models.job_model import Job, JobEvent, JobStatus
 
@@ -15,6 +16,7 @@ class JobQueueService:
     def __init__(self, session: Session, timezone) -> None:
         self.session = session
         self.timezone = timezone
+        self.logger = get_logger(__name__)
 
     def create_job(
         self,
@@ -52,6 +54,7 @@ class JobQueueService:
         self.session.add(job)
         self.session.flush()
         self.record_event(job.id, "job_created", f"Job {job.job_type} created", payload)
+        self.logger.info("Created job %s (%s) priority=%s", job.id, job.job_type, job.priority)
         return job
 
     def list_jobs(self, limit: int = 50) -> list[Job]:
@@ -101,6 +104,7 @@ class JobQueueService:
             job.started_at = job.started_at or now
             job.attempt_count += 1
             self.record_event(job.id, "job_claimed", "Job claimed by dispatcher", None)
+            self.logger.info("Claimed job %s (%s)", job.id, job.job_type)
             return job
         return None
 
@@ -110,6 +114,7 @@ class JobQueueService:
         job.result_json = result
         job.finished_at = utc_now()
         self.record_event(job.id, "job_completed", "Job completed successfully", result)
+        self.logger.info("Completed job %s (%s)", job.id, job.job_type)
         self._enqueue_next_recurring_run(job)
         return job
 
@@ -127,6 +132,7 @@ class JobQueueService:
             job.finished_at = utc_now()
             job.error_message = error_message
             self.record_event(job.id, "job_failed", error_message, None)
+            self.logger.error("Job %s failed: %s", job.id, error_message)
         return job
 
     def record_event(self, job_id: int, event_type: str, message: str, data: dict[str, Any] | None) -> JobEvent:

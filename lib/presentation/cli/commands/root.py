@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, time
-from pathlib import Path
 
 import typer
 from alembic import command
 from alembic.config import Config
 
 from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
-from lib.domain.services.job_queue_service import JobQueueService
-from lib.domain.models.mapper_types import MapperMode, MapperRunConfig
-from lib.domain.services.worker_service import WorkerService
-from lib.domain.services.ui_mapper_service import UiMapperService
+from lib.core.logs import LogTarget, configure_logging
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
+from lib.domain.models.mapper_types import MapperMode, MapperRunConfig
+from lib.domain.services.job_queue_service import JobQueueService
+from lib.domain.services.ui_mapper_service import UiMapperService
+from lib.domain.services.worker_service import WorkerService
 from lib.presentation.cli.formatters.job_formatter import JobFormatter
 from lib.presentation.cli.outputs.json_output import JsonOutput
 
@@ -26,6 +26,12 @@ app.add_typer(jobs_app, name="jobs")
 app.add_typer(worker_app, name="worker")
 app.add_typer(db_app, name="db")
 app.add_typer(mapper_app, name="mapper")
+
+
+@app.callback()
+def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable detailed CLI logs")) -> None:
+    settings = get_settings()
+    configure_logging(debug=settings.debug, verbose=verbose, target=LogTarget.CLI)
 
 
 def _parse_json_payload(raw: str | None) -> dict:

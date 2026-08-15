@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from lib.core.logs import get_logger
 from lib.domain.models.mapper_types import MapperMode, MapperRunConfig
 from lib.domain.services.ui_mapper_service import UiMapperService
 
@@ -103,6 +104,7 @@ class FakeSessionScope:
 
 def test_ui_mapper_service_runs_light_mode_with_basic_capture(monkeypatch) -> None:
     service = UiMapperService.__new__(UiMapperService)
+    service.logger = get_logger(__name__)
     service.settings = None
     service.adb = FakeAdb()
     service.ui = FakeUi()
@@ -129,6 +131,7 @@ def test_ui_mapper_service_runs_light_mode_with_basic_capture(monkeypatch) -> No
 
 def test_ui_mapper_service_skips_dangerous_actions(monkeypatch) -> None:
     service = UiMapperService.__new__(UiMapperService)
+    service.logger = get_logger(__name__)
     service.settings = None
     service.adb = FakeAdb()
 

@@ -3,14 +3,22 @@ from __future__ import annotations
 import subprocess
 import time
 
+from lib.core.logs import get_logger
+
 
 class AdbAdapter:
     def __init__(self, serial: str) -> None:
         self.serial = serial
+        self.logger = get_logger(__name__)
 
     def run(self, *args: str) -> str:
         command = ["adb", "-s", self.serial, *args]
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        self.logger.debug("Running adb command: %s", " ".join(command))
+        try:
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            self.logger.error("adb command failed: %s (%s)", " ".join(command), exc.stderr.strip() if exc.stderr else exc)
+            raise
         return result.stdout.strip()
 
     def get_state(self) -> str:

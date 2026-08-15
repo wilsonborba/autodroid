@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from lib.core.logs import get_logger
 from lib.presentation.api.dependencies import get_mapper_engine, get_mapper_export_service, get_session, get_settings
 from lib.domain.models.mapper_types import MapperMode, MapperRunConfig
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.presentation.api.schemas.mapper_schemas import MapperExportResponse, MapperRunRequest, MapperRunResponse, MapperSessionResponse
 
 router = APIRouter(prefix="/mapper", tags=["mapper"])
+logger = get_logger(__name__)
 
 
 @router.post("/run", response_model=MapperRunResponse)
 def run_mapper(payload: MapperRunRequest):
+    logger.info("POST /mapper/run package=%s mode=%s", payload.package_name, payload.mode)
     try:
         mode = MapperMode(payload.mode)
     except ValueError as exc:
@@ -46,5 +49,6 @@ def show_mapper_session(session_id: int):
 
 @router.post("/sessions/{session_id}/export", response_model=MapperExportResponse)
 def export_mapper_session(session_id: int):
+    logger.info("POST /mapper/sessions/%s/export", session_id)
     export_path = get_mapper_export_service().export_session(session_id, get_settings().output_dir / "mappers")
     return MapperExportResponse(session_id=session_id, export_path=str(export_path))
