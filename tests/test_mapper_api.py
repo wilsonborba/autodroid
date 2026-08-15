@@ -3,6 +3,9 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from lib.bootstrap import create_api_app
+from lib.dal.local.database import SessionLocal
+from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
+from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperSessionStatus
 
 
 class FakeMapperEngine:
@@ -74,3 +77,90 @@ def test_mapper_export_endpoint(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()['session_id'] == 42
+
+
+def _seed_graph() -> dict:
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(
+            package_name="com.api.testapp",
+            mode=MapperMode.LIGHT,
+            skip_dangerous_actions=True,
+            max_depth=1,
+            max_actions=8,
+            max_scrolls=0,
+        )
+        mapper_session.status = MapperSessionStatus.COMPLETED
+        screen_a = repository.create_screen(session_id=mapper_session.id, fingerprint="a", screen_key="screen-a", depth=0, ordinal=0)
+        screen_b = repository.create_screen(session_id=mapper_session.id, fingerprint="b", screen_key="screen-b", depth=1, ordinal=1)
+        node = repository.create_node(screen_id=screen_a.id, node_key="node-1", text="Profile", clickable=True)
+        action = repository.create_action(
+            session_id=mapper_session.id,
+            screen_id=screen_a.id,
+            node_id=node.id,
+            action_key="click:profile",
+            action_type="click",
+            label="Profile",
+            safety=MapperActionSafety.SAFE,
+        )
+        transition = repository.create_transition(session_id=mapper_session.id, from_screen_id=screen_a.id, action_id=action.id, to_screen_id=screen_b.id, result_type="clicked")
+        session.commit()
+        return {"session_id": mapper_session.id, "screen_a_id": screen_a.id, "screen_b_id": screen_b.id, "action_id": action.id, "transition_id": transition.id}
+
+
+def test_list_and_show_mapper_screens_endpoint() -> None:
+    ids = _seed_graph()
+    client = TestClient(create_api_app())
+
+    list_response = client.get(f"/mapper/sessions/{ids['session_id']}/screens")
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 2
+
+    detail_response = client.get(f"/mapper/sessions/{ids['session_id']}/screens/{ids['screen_a_id']}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()['nodes'][0]['text'] == 'Profile'
+
+
+def test_list_mapper_actions_endpoint_with_filters() -> None:
+    ids = _seed_graph()
+    client = TestClient(create_api_app())
+
+    response = client.get(f"/mapper/sessions/{ids['session_id']}/actions", params={"safety": "safe"})
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+    invalid = client.get(f"/mapper/sessions/{ids['session_id']}/actions", params={"safety": "not-a-safety"})
+    assert invalid.status_code == 400
+
+
+def test_list_mapper_transitions_endpoint() -> None:
+    ids = _seed_graph()
+    client = TestClient(create_api_app())
+
+    response = client.get(f"/mapper/sessions/{ids['session_id']}/transitions")
+    assert response.status_code == 200
+    assert response.json()[0]['result_type'] == 'clicked'
+
+
+def test_mapper_graph_endpoint() -> None:
+    ids = _seed_graph()
+    client = TestClient(create_api_app())
+
+    response = client.get(f"/mapper/sessions/{ids['session_id']}/graph")
+    assert response.status_code == 200
+    body = response.json()
+    assert body['package_name'] == 'com.api.testapp'
+    assert len(body['screens']) == 2
+    assert len(body['transitions']) == 1
+
+
+def test_latest_mapper_session_endpoint() -> None:
+    ids = _seed_graph()
+    client = TestClient(create_api_app())
+
+    response = client.get("/mapper/apps/com.api.testapp/latest-session")
+    assert response.status_code == 200
+    assert response.json()['id'] == ids['session_id']
+
+    missing = client.get("/mapper/apps/com.unknown.testapp/latest-session")
+    assert missing.status_code == 404

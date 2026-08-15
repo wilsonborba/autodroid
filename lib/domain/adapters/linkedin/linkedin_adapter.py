@@ -7,46 +7,59 @@ from typing import Any
 from lib.core.logs import get_logger
 from lib.core.settings import Settings
 from lib.core.utils.json_utils import write_json
+from lib.dal.local.database import session_scope
 from lib.dal.remote.adb_adapter import AdbAdapter
-from lib.dal.remote.ocr_adapter import OcrAdapter
-from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
+from lib.domain.models.mapper_flow_model import MapperFlow, MapperFlowStep
+from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
+from lib.domain.services.mapper_flow_service import MapperFlowService
 from lib.domain.services.navigation_context_service import NavigationContextService
+
+EXTRACT_PROFILE_FLOW_NAME = "extract_profile_basic"
+PROFILE_SCREENSHOT_FILENAME = "linkedin_profile_basic.png"
 
 
 class LinkedInAdapter:
+    """Extracts basic LinkedIn profile data.
+
+    Navigation to the profile entrypoint runs as a MapperFlow (see issue #18), auto-created
+    on first use and reused afterwards, so it is decoupled from this class and inspectable via
+    `mapper flow show`. Scroll/dump/OCR steps stay payload-driven here (their count depends on
+    `payload["scrolls"]` per call) but still execute through MapperFlowExecutionService, so no
+    click/scroll logic is duplicated between this adapter and the flow engine. Interpreting the
+    collected text (name/headline/etc) is domain logic, not navigation, so it stays here.
+    """
+
     def __init__(self, settings: Settings) -> None:
         self.logger = get_logger(__name__)
         self.settings = settings
         self.adb = AdbAdapter(settings.android_serial)
-        self.ui = UiAutomatorAdapter(settings.android_serial)
-        self.ocr = OcrAdapter(settings.ocr_language)
         self.navigation_context = NavigationContextService(self.adb)
+        self.flow_execution_service = MapperFlowExecutionService(settings)
 
     def extract_profile_basic(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.logger.info("Starting LinkedIn profile extraction")
         self._ensure_device_ready()
-        resume_context = self.navigation_context.load_resume_context(payload)
-        if self.navigation_context.can_resume(resume_context):
-            self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
-        else:
-            self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
+        self.navigation_context.prepare_fresh_app_launch(self.settings.linkedin_package_name)
 
-        profile_opened = self._open_profile_entrypoint()
+        flow = self._ensure_extract_profile_flow()
+        entrypoint_result = self.flow_execution_service.run_step(flow.steps[0])
+        profile_opened = bool(entrypoint_result.get("success"))
 
         scrolls = int(payload.get("scrolls", 2))
-        screenshot_dir = self.settings.output_dir / "screenshots"
         all_nodes: list[dict[str, Any]] = []
         for index in range(scrolls + 1):
-            all_nodes.extend(self.ui.dump_nodes())
+            dump_result = self.flow_execution_service.run_step(self._transient_step("dump_nodes"))
+            all_nodes.extend(dump_result.get("nodes") or [])
             if index < scrolls:
-                self.ui.swipe_up()
+                self.flow_execution_service.run_step(self._transient_step("scroll_up"))
 
         deduped_nodes = list(OrderedDict((self._node_key(node), node) for node in all_nodes).values())
         visible_texts = self._collect_texts(deduped_nodes)
         ocr_lines: list[str] = []
         if not visible_texts:
-            screenshot_path = self.ui.screenshot(screenshot_dir / "linkedin_profile_basic.png")
-            ocr_lines = self.ocr.extract_lines(screenshot_path)
+            self.flow_execution_service.run_step(self._transient_step("screenshot", params_json={"filename": PROFILE_SCREENSHOT_FILENAME}))
+            ocr_result = self.flow_execution_service.run_step(self._transient_step("ocr_extract", params_json={"filename": PROFILE_SCREENSHOT_FILENAME}))
+            ocr_lines = ocr_result.get("ocr_lines") or []
 
         self.logger.info("LinkedIn profile entrypoint opened=%s", profile_opened)
         result = {
@@ -64,31 +77,40 @@ class LinkedInAdapter:
             write_json(output_path, result)
         return result
 
-    def _open_profile_entrypoint(self) -> bool:
-        if self.ui.click_first_by_text_or_description(
-            "Meu perfil",
-            "Perfil",
-            "My Profile",
-            "View Profile",
-            "Ver perfil",
-        ):
-            return True
+    def _ensure_extract_profile_flow(self) -> MapperFlow:
+        with session_scope() as session:
+            service = MapperFlowService(session)
+            flow = service.flow_repository.get_flow_by_name(self.settings.linkedin_package_name, EXTRACT_PROFILE_FLOW_NAME)
+            if flow is None:
+                self.logger.info("Creating mapper flow %s for %s", EXTRACT_PROFILE_FLOW_NAME, self.settings.linkedin_package_name)
+                flow = service.create_flow(
+                    name=EXTRACT_PROFILE_FLOW_NAME,
+                    package_name=self.settings.linkedin_package_name,
+                    description="Open the LinkedIn profile entrypoint, trying the direct shortcut first and falling back to the navigation menu.",
+                    steps=[
+                        {
+                            "action_type": "click_first_match",
+                            "selector": {
+                                "attempts": [
+                                    {"match": "exact", "candidates": ["Meu perfil", "Perfil", "My Profile", "View Profile", "Ver perfil"]},
+                                    {
+                                        "match": "contains_then_exact",
+                                        "open_candidates": ["access my profile", "my profile and communities", "profile and other navigation links"],
+                                        "then_candidates": ["My Profile", "View Profile", "Meu perfil", "Ver perfil", "Profile"],
+                                    },
+                                ]
+                            },
+                        }
+                    ],
+                )
+            return flow
 
-        menu_opened = self.ui.click_first_by_text_or_description_contains(
-            "access my profile",
-            "my profile and communities",
-            "profile and other navigation links",
-        )
-        if menu_opened and self.ui.click_first_by_text_or_description(
-            "My Profile",
-            "View Profile",
-            "Meu perfil",
-            "Ver perfil",
-            "Profile",
-        ):
-            return True
-
-        return False
+    @staticmethod
+    def _transient_step(action_type: str, *, selector_json: dict[str, Any] | None = None, params_json: dict[str, Any] | None = None) -> MapperFlowStep:
+        """A step used for this call only, not persisted. Reuses the execution service's
+        handlers (dump/scroll/screenshot/ocr) without requiring every extraction run to
+        write a fixed, payload-independent step count into the flow definition."""
+        return MapperFlowStep(flow_id=0, ordinal=0, action_type=action_type, selector_json=selector_json or {}, params_json=params_json)
 
     def _ensure_device_ready(self) -> None:
         if self.adb.get_state() != "device":
