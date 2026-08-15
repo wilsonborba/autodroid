@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from lib.presentation.api.dependencies import get_mapper_engine, get_session
+from lib.presentation.api.dependencies import get_mapper_engine, get_mapper_export_service, get_session, get_settings
 from lib.domain.models.mapper_types import MapperMode, MapperRunConfig
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
-from lib.presentation.api.schemas.mapper_schemas import MapperRunRequest, MapperRunResponse, MapperSessionResponse
+from lib.presentation.api.schemas.mapper_schemas import MapperExportResponse, MapperRunRequest, MapperRunResponse, MapperSessionResponse
 
 router = APIRouter(prefix="/mapper", tags=["mapper"])
 
@@ -42,3 +42,9 @@ def show_mapper_session(session_id: int):
         if mapper_session is None:
             raise HTTPException(status_code=404, detail="Mapper session not found")
         return MapperSessionResponse.model_validate(mapper_session, from_attributes=True)
+
+
+@router.post("/sessions/{session_id}/export", response_model=MapperExportResponse)
+def export_mapper_session(session_id: int):
+    export_path = get_mapper_export_service().export_session(session_id, get_settings().output_dir / "mappers")
+    return MapperExportResponse(session_id=session_id, export_path=str(export_path))

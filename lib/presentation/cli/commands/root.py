@@ -8,7 +8,7 @@ import typer
 from alembic import command
 from alembic.config import Config
 
-from lib.bootstrap import create_dispatcher, create_api_app, get_session, get_settings
+from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
 from lib.domain.services.job_queue_service import JobQueueService
 from lib.domain.models.mapper_types import MapperMode, MapperRunConfig
 from lib.domain.services.worker_service import WorkerService
@@ -204,3 +204,10 @@ def show_mapper_session(session_id: int, as_json: bool = False) -> None:
             typer.echo(JsonOutput.render(payload))
             return
         typer.echo(str(payload))
+
+
+@mapper_app.command("export")
+def export_mapper_session(session_id: int) -> None:
+    output_dir = get_settings().output_dir / "mappers"
+    export_path = get_mapper_export_service().export_session(session_id, output_dir)
+    typer.echo(str(export_path))

@@ -79,7 +79,7 @@ class SqlAlchemyMapperRepository:
         return transition
 
     def get_session(self, session_id: int) -> MapperSession | None:
-        stmt = select(MapperSession).options(selectinload(MapperSession.screens), selectinload(MapperSession.actions), selectinload(MapperSession.transitions)).where(MapperSession.id == session_id)
+        stmt = select(MapperSession).options(selectinload(MapperSession.screens).selectinload(MapperScreen.nodes), selectinload(MapperSession.actions), selectinload(MapperSession.transitions)).where(MapperSession.id == session_id)
         return self.session.scalar(stmt)
 
     def list_sessions(self, limit: int = 50) -> list[MapperSession]:

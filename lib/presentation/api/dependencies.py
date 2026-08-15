@@ -20,3 +20,9 @@ from lib.domain.services.ui_mapper_service import UiMapperService
 
 def get_mapper_engine() -> UiMapperService:
     return UiMapperService(_settings)
+
+from lib.domain.services.local_mapper_export_service import LocalMapperExportService
+
+
+def get_mapper_export_service() -> LocalMapperExportService:
+    return LocalMapperExportService()

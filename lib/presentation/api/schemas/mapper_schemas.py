@@ -34,3 +34,8 @@ class MapperSessionResponse(BaseModel):
     max_actions: int
     max_scrolls: int
     created_at: datetime
+
+
+class MapperExportResponse(BaseModel):
+    session_id: int
+    export_path: str

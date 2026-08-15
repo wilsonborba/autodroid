@@ -11,6 +11,7 @@ from lib.domain.adapters.linkedin.tasks.extract_profile_task import ExtractLinke
 from lib.domain.services.automation_service import AutomationRegistryService
 from lib.domain.services.dispatcher_service import DispatcherService
 from lib.domain.services.ui_mapper_service import UiMapperService
+from lib.domain.services.local_mapper_export_service import LocalMapperExportService
 from lib.presentation.api.routes.jobs import router as jobs_router
 from lib.presentation.api.routes.mapper import router as mapper_router
 
@@ -51,3 +52,8 @@ def create_api_app() -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(mapper_router)
     return app
+
+
+@lru_cache(maxsize=1)
+def get_mapper_export_service() -> LocalMapperExportService:
+    return LocalMapperExportService()

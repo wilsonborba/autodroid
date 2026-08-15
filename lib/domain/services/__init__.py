@@ -11,3 +11,5 @@ from lib.domain.services.ui_mapper_service import UiMapperService
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 
 from lib.domain.services.mapper_safety_service import MapperSafetyService
+
+from lib.domain.services.local_mapper_export_service import LocalMapperExportService
