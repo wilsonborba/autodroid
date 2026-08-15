@@ -38,6 +38,10 @@ class MapperLimits:
     max_depth: int
     max_actions: int
     max_scrolls: int
+    # how many consecutive scrolls with the same structural signature (issue #25) before giving
+    # up on that screen: this is what actually stops scrolling a feed, `max_scrolls` is just the
+    # safety ceiling behind it
+    repeat_signature_threshold: int
 
 
 @dataclass(frozen=True)

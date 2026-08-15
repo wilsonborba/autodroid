@@ -22,6 +22,7 @@ class MapperSession(Base):
     max_depth: Mapped[int] = mapped_column(Integer, nullable=False)
     max_actions: Mapped[int] = mapped_column(Integer, nullable=False)
     max_scrolls: Mapped[int] = mapped_column(Integer, nullable=False)
+    repeat_signature_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
