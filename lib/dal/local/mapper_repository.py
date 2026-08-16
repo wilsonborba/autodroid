@@ -219,6 +219,23 @@ class SqlAlchemyMapperRepository:
         stmt = select(MapperTransition).where(MapperTransition.action_id == action_id).order_by(MapperTransition.id).limit(1)
         return self.session.scalar(stmt)
 
+    def find_known_return_action(self, session_id: int, from_screen_id: int, to_screen_id: int) -> MapperAction | None:
+        stmt = (
+            select(MapperAction)
+            .join(MapperTransition, MapperTransition.action_id == MapperAction.id)
+            .where(
+                MapperAction.session_id == session_id,
+                MapperAction.screen_id == from_screen_id,
+                MapperAction.success.is_(True),
+                MapperAction.action_key.like("return:%"),
+                MapperTransition.to_screen_id == to_screen_id,
+                MapperTransition.result_type == "clicked",
+            )
+            .order_by(MapperAction.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(stmt)
+
     def get_action(self, action_id: int) -> MapperAction | None:
         return self.session.get(MapperAction, action_id)
 
