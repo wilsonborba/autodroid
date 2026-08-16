@@ -54,7 +54,15 @@ def list_jobs(limit: int = 50):
         return [JobResponse.model_validate(job, from_attributes=True) for job in jobs]
 
 
-@router.get("/jobs/{job_id}", response_model=JobResponse, summary="Get one job's current status")
+@router.get(
+    "/jobs/{job_id}", response_model=JobResponse, summary="Get one job's current status",
+    description="`status` reflects claim/completion the moment they happen (issue #46), not just "
+    "before/after: poll this mid-run to see it flip from `pending`/`scheduled` to `running`, then "
+    "to `completed`/`failed`. For live progress on a `mapper.remap` job specifically, read "
+    "`payload_json.package_name` and correlate to `GET /mapper/apps/{package_name}/latest-session`: "
+    "the mapper commits each screen as it's found, so `screens_recorded` there grows in real time "
+    "while this job still shows `running`.",
+)
 def get_job(job_id: int):
     settings = get_settings()
     with get_session() as session:
