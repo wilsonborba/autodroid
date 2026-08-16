@@ -53,7 +53,11 @@ class MapperFlowExecutionService:
             "click_bounds": self._execute_click_bounds,
             "type_text": self._execute_type_text,
             "scroll_up": self._execute_scroll_up,
+            "scroll_down": self._execute_scroll_down,
             "back": self._execute_back,
+            "home": self._execute_home,
+            "enter": self._execute_enter,
+            "keyevent": self._execute_keyevent,
             "wait": self._execute_wait,
             "dump_nodes": self._execute_dump_nodes,
             "screenshot": self._execute_screenshot,
@@ -428,8 +432,27 @@ class MapperFlowExecutionService:
         self.ui.swipe_up()
         return {"success": True}
 
+    def _execute_scroll_down(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.ui.swipe_down()
+        return {"success": True}
+
     def _execute_back(self, step: MapperFlowStep) -> dict[str, Any]:
         self.adb.press_back()
+        return {"success": True}
+
+    def _execute_home(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.adb.go_home()
+        return {"success": True}
+
+    def _execute_enter(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.adb.press_enter()
+        return {"success": True}
+
+    def _execute_keyevent(self, step: MapperFlowStep) -> dict[str, Any]:
+        keycode = (step.selector_json or {}).get("keycode")
+        if not keycode:
+            return {"success": False}
+        self.adb.keyevent(str(keycode))
         return {"success": True}
 
     def _execute_wait(self, step: MapperFlowStep) -> dict[str, Any]:

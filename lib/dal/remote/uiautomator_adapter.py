@@ -94,6 +94,10 @@ class UiAutomatorAdapter:
         self.device.swipe_ext("up", scale=0.8)
         time.sleep(1)
 
+    def swipe_down(self) -> None:
+        self.device.swipe_ext("down", scale=0.8)
+        time.sleep(1)
+
     def screenshot(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.device.screenshot(str(path))

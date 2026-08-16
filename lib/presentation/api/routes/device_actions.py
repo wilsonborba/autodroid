@@ -25,7 +25,8 @@ previous call returned.
    chain of steps from the root. You never need to compute this path yourself.
 
 2. **A raw action** (`action_type`, one of `click`, `click_first_match`, `click_bounds`,
-   `type_text`, `scroll_up`, `back`, `wait`, `dump_nodes`, `screenshot`, `ocr_extract`): runs
+   `type_text`, `scroll_up`, `scroll_down`, `back`, `home`, `enter`, `keyevent`, `wait`,
+   `dump_nodes`, `screenshot`, `ocr_extract`): runs
    against whatever is currently on screen. Pass `target_screen_id` (a `MapperScreen` id) to also
    get navigated there first, the same way as a mapped action; without it, nothing is navigated,
    this fires immediately against the live screen, useful right after a previous call already
@@ -38,7 +39,9 @@ takes `{"bounds": "[x1,y1][x2,y2]"}` (an exact screen region, e.g. from a prior 
 though it visually reacts to a tap, some apps do this for their own icon rows); `type_text` takes
 `{"text": str, "clear": bool}` (types into whatever is currently focused, so a `click`/
 `click_bounds` on the field comes first as its own step; `clear` wipes existing content before
-typing); `wait` takes `params: {"seconds": float}`; the rest need no selector.
+typing); `keyevent` takes `{"keycode": str}` such as `KEYCODE_ENTER`; `enter` is a shortcut
+for the most common submit action; `wait` takes `params: {"seconds": float}`; the rest need no
+selector.
 
 **Response**: `success` tells whether the action itself worked. `resulting_screen_id` is the new
 known position when knowable (a mapped action's destination, or a read-only action like

@@ -38,6 +38,10 @@ class AdbAdapter:
         self.keyevent("KEYCODE_BACK")
         time.sleep(0.5)
 
+    def press_enter(self) -> None:
+        self.keyevent("KEYCODE_ENTER")
+        time.sleep(0.5)
+
     def force_stop_app(self, package_name: str) -> str:
         return self.shell(f"am force-stop {package_name}")
 

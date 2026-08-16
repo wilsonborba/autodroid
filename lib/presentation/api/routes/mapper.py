@@ -80,7 +80,12 @@ def list_installed_packages():
 
 @router.post("/apps/{package_name}/start", response_model=MapperOnDemandStartResponse, summary="Start an app with a fresh launch for on-demand mapper use")
 def start_mapper_app(package_name: str):
-    return MapperOnDemandStartResponse(**get_mapper_on_demand_service().start_app(package_name))
+    try:
+        return MapperOnDemandStartResponse(**get_mapper_on_demand_service().start_app(package_name))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Unable to start {package_name}: {exc}") from exc
 
 
 @router.get("/on-demand/inspect", response_model=MapperOnDemandInspectResponse, summary="Inspect the current screen with mapper-aware persistence")

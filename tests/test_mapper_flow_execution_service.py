@@ -77,6 +77,7 @@ class FakeUi:
         self.exact_result = True
         self.contains_result = True
         self.swipes = 0
+        self.swipes_down = 0
         self.screenshots: list[str] = []
         self.clicked_bounds: list[str] = []
         self.click_bounds_result = True
@@ -106,6 +107,9 @@ class FakeUi:
         self.screenshots.append(str(path))
         return path
 
+    def swipe_down(self) -> None:
+        self.swipes_down += 1
+
     def click_bounds(self, bounds: str) -> bool:
         self.clicked_bounds.append(bounds)
         return self.click_bounds_result
@@ -118,9 +122,21 @@ class FakeUi:
 class FakeAdb:
     def __init__(self) -> None:
         self.back_calls = 0
+        self.home_calls = 0
+        self.enter_calls = 0
+        self.keyevents: list[str] = []
 
     def press_back(self) -> None:
         self.back_calls += 1
+
+    def go_home(self) -> None:
+        self.home_calls += 1
+
+    def press_enter(self) -> None:
+        self.enter_calls += 1
+
+    def keyevent(self, keycode: str) -> None:
+        self.keyevents.append(keycode)
 
 
 class FakeNav:
@@ -162,7 +178,11 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
         "click_bounds": service._execute_click_bounds,
         "type_text": service._execute_type_text,
         "scroll_up": service._execute_scroll_up,
+        "scroll_down": service._execute_scroll_down,
         "back": service._execute_back,
+        "home": service._execute_home,
+        "enter": service._execute_enter,
+        "keyevent": service._execute_keyevent,
         "wait": service._execute_wait,
         "dump_nodes": service._execute_dump_nodes,
         "screenshot": service._execute_screenshot,
@@ -240,6 +260,56 @@ def test_type_text_step_fails_without_text() -> None:
 
     assert result["success"] is False
     assert service.ui.typed_text == []
+
+
+def test_scroll_down_step_swipes_down() -> None:
+    service = build_service()
+    step = make_step(action_type="scroll_down")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swipes_down == 1
+
+
+def test_enter_step_presses_enter() -> None:
+    service = build_service()
+    step = make_step(action_type="enter")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.adb.enter_calls == 1
+
+
+def test_home_step_goes_home() -> None:
+    service = build_service()
+    step = make_step(action_type="home")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.adb.home_calls == 1
+
+
+def test_keyevent_step_sends_requested_keycode() -> None:
+    service = build_service()
+    step = make_step(action_type="keyevent", selector_json={"keycode": "KEYCODE_SEARCH"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.adb.keyevents == ["KEYCODE_SEARCH"]
+
+
+def test_keyevent_step_fails_without_keycode() -> None:
+    service = build_service()
+    step = make_step(action_type="keyevent", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.adb.keyevents == []
 
 
 def test_ocr_extract_step_returns_text_regions() -> None:
