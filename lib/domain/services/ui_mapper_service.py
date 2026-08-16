@@ -286,8 +286,8 @@ class UiMapperService(MapperEngine):
         if self._left_target_app(nodes, package_name):
             return None
 
-        fingerprint = self.fingerprint_service.fingerprint(nodes)
-        structural_signature = self.fingerprint_service.structural_signature(nodes)
+        fingerprint = self.fingerprint_service.fingerprint(nodes, package_name)
+        structural_signature = self.fingerprint_service.structural_signature(nodes, package_name)
         existing_screen = repository.find_screen_by_fingerprint(session_id, fingerprint)
 
         if existing_screen is not None:
@@ -317,7 +317,7 @@ class UiMapperService(MapperEngine):
                         continue
                     if self.ui.click_bounds(node.bounds):
                         replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [node.bounds])
-                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
+                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
                 return screen.id
 
             # resumed mid-screen (crash, a session continued in a deeper mode, or a forced
@@ -457,7 +457,7 @@ class UiMapperService(MapperEngine):
             current_nodes = self.ui.dump_nodes()
 
             if self._left_target_app(current_nodes, package_name):
-                self._return_to_screen(package_name, ancestor_bounds, departed=True)
+                self._return_to_screen(package_name, ancestor_bounds, departed=True, expected_fingerprint=screen.fingerprint)
                 break
 
             new_nodes_found = False
@@ -533,7 +533,7 @@ class UiMapperService(MapperEngine):
                     self.logger.debug("Replaying known action %r on screen %s", candidate.label, screen.id)
                     if self.ui.click_bounds(existing_node.bounds):
                         replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
-                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None)
+                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
                 continue
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
@@ -585,7 +585,7 @@ class UiMapperService(MapperEngine):
                     to_screen_id=to_screen_id,
                     result_type="clicked" if to_screen_id is not None else "left_app",
                 )
-                self._return_to_screen(package_name, ancestor_bounds, departed=to_screen_id is None)
+                self._return_to_screen(package_name, ancestor_bounds, departed=to_screen_id is None, expected_fingerprint=screen.fingerprint)
             else:
                 repository.create_transition(
                     session_id=session_id,
@@ -666,7 +666,7 @@ class UiMapperService(MapperEngine):
             self.logger.debug("Navigating back via the system back button: no in-app back/up/close affordance found")
             self.adb.press_back()
 
-    def _return_to_screen(self, package_name: str, ancestor_bounds: list[str], *, departed: bool) -> None:
+    def _return_to_screen(self, package_name: str, ancestor_bounds: list[str], *, departed: bool, expected_fingerprint: str | None = None) -> None:
         """Undoes the click that was just made, one way or another, so the caller's own screen
         is current again and its remaining candidates can keep being tried.
 
@@ -679,11 +679,38 @@ class UiMapperService(MapperEngine):
         known state: its root) and replay the exact clicks that got here (issue #28), passed down
         the recursion as `ancestor_bounds` rather than looked up in the database: the transition
         connecting into the current screen isn't committed yet while we're still inside exploring
-        it, so a lookup at this point wouldn't find it."""
+        it, so a lookup at this point wouldn't find it.
+
+        `expected_fingerprint`, when given, is verified afterward (issue #47): a single back
+        press is not guaranteed to land back exactly where it started every time (an in-app
+        "back" affordance can close more than one layer at once, or the app can settle on a
+        slightly different state), and every remaining candidate for the caller's screen assumes
+        it did, clicking that screen's own recorded bounds against whatever is actually showing
+        instead if it's wrong. Concretely reproduced: eleven completely different candidates on
+        one profile screen all landing on the exact same unrelated feed post, because nothing
+        ever checked that the "back" after the first one actually worked. A mismatch here forces
+        one corrective relaunch + full replay, the same reliable recovery already used when the
+        app was fully left, since simply retrying "back" has no way to fix a wrong state it
+        already produced."""
         if not departed:
             self._navigate_back(package_name)
+        else:
+            self.logger.warning("Relaunching %s and replaying %s step(s) back to the current screen after leaving the app", package_name, len(ancestor_bounds))
+            self.navigation_context.prepare_fresh_app_launch(package_name)
+            for bounds in ancestor_bounds:
+                self.ui.click_bounds(bounds)
+
+        if expected_fingerprint is None:
             return
-        self.logger.warning("Relaunching %s and replaying %s step(s) back to the current screen after leaving the app", package_name, len(ancestor_bounds))
+
+        nodes = self.ui.dump_nodes()
+        landed_fingerprint = None if self._left_target_app(nodes, package_name) else self.fingerprint_service.fingerprint(nodes, package_name)
+        if landed_fingerprint == expected_fingerprint:
+            return
+        self.logger.warning(
+            "Return-to-screen landed somewhere unexpected (departed=%s), forcing a relaunch and full replay to recover",
+            departed,
+        )
         self.navigation_context.prepare_fresh_app_launch(package_name)
         for bounds in ancestor_bounds:
             self.ui.click_bounds(bounds)

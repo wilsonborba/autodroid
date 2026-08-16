@@ -378,6 +378,24 @@ def test_repeated_step_stops_at_max_duration(monkeypatch) -> None:
     assert result["iterations_run"] >= 1
 
 
+def test_repeated_step_ignores_foreign_package_noise_when_detecting_no_new_content() -> None:
+    # issue #47: a status-bar clock (or any other foreign-package node) changing every dump would
+    # otherwise make the fingerprint differ on every single iteration even though the app's own
+    # content genuinely stopped changing, so "no_new_content" would never trigger, running until
+    # max_iterations/max_duration_seconds instead
+    dumps = [
+        [{"text": "same content", "package_name": "com.test.testapp"}, {"text": f"{9 + i}:0{i} PM", "resource_id": "clock", "package_name": "com.android.systemui"}]
+        for i in range(5)
+    ]
+    service = build_service(dump_sequence=dumps)
+    step = make_step(action_type="scroll_up", package_name="com.test.testapp", params_json={"repeat": {"max_iterations": 50}})
+
+    result = service.run_step(step)
+
+    assert result["stop_reason"] == "no_new_content"
+    assert result["iterations_run"] == 2  # one iteration to see it, one more to confirm it repeated
+
+
 def test_repeated_step_stops_when_content_stops_changing() -> None:
     # 3 distinct dumps, then it "settles" and keeps returning the last one forever: it takes one
     # extra iteration past the last distinct dump to actually notice the fingerprint repeated

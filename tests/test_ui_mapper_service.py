@@ -43,6 +43,7 @@ _TEST_PACKAGE_NAMES = (
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
     "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
     "com.candidatelog.testapp", "com.replaylog.testapp", "com.remapscreen.testapp",
+    "com.returnverify.testapp",
 )
 
 
@@ -113,7 +114,11 @@ def build_service(dumps: list[list[dict]]) -> UiMapperService:
 
 
 def test_fresh_mapper_run_light_mode_records_root_and_leaf() -> None:
-    service = build_service([ROOT_NODES, LEAF_NODES])
+    # the trailing ROOT_NODES x2 are the return-to-screen round trip after the leaf (issue #47):
+    # _navigate_back's own look-back dump, then the post-return verification, which must
+    # fingerprint-match the root screen or a corrective relaunch would add an extra entry to
+    # navigation_context.prepared below
+    service = build_service([ROOT_NODES, LEAF_NODES, ROOT_NODES, ROOT_NODES])
 
     result = service.run(MapperRunConfig(package_name="com.fresh.testapp", mode=MapperMode.LIGHT))
 
@@ -157,7 +162,10 @@ def test_dangerous_action_is_blocked_by_default() -> None:
 
 
 def test_click_that_leaves_the_target_app_is_not_recorded_as_a_screen() -> None:
-    service = build_service([IN_APP_ROOT, FOREIGN_APP_SCREEN])
+    # trailing IN_APP_ROOT: the post-recovery verification dump (issue #47), confirming the
+    # relaunch+replay actually landed back on the root; matching it keeps this test's original
+    # "exactly one recovery relaunch" assertion below true
+    service = build_service([IN_APP_ROOT, FOREIGN_APP_SCREEN, IN_APP_ROOT])
 
     result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
 
@@ -228,13 +236,46 @@ def test_leaving_the_app_from_a_deep_screen_relaunches_and_replays_the_way_back(
     root = [{"text": "Open Section", "content_desc": "", "resource_id": "open_section", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
     mid = [{"text": "Share", "content_desc": "", "resource_id": "share_btn", "class_name": "TextView", "bounds": "[0,20][10,30]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
     foreign = [{"text": "Share via", "content_desc": "", "resource_id": "chooser", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.android.systemui"}]
-    service = build_service([root, mid, foreign])
+    # after `foreign`: `mid` twice (the recovery's own post-return verification, then
+    # _navigate_back's look-back dump one level up) and `root` once (that return's own
+    # verification) round out the two return-to-screen checks (issue #47) this walk makes
+    service = build_service([root, mid, foreign, mid, mid, root])
 
     service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
 
     # open_section, then share (which leaves the app), then open_section again to walk back to mid
     assert service.ui.clicks == ["[0,0][10,10]", "[0,20][10,30]", "[0,0][10,10]"]
     assert service.navigation_context.prepared == ["com.target.testapp", "com.target.testapp"]
+
+
+def test_return_to_screen_recovers_via_relaunch_when_back_navigation_lands_somewhere_wrong() -> None:
+    # issue #47, reproducing a real bug found live: eleven completely different candidates on one
+    # profile screen all landed on the exact same unrelated feed post, because nothing ever
+    # verified that the "back" after the first one actually worked. Here, candidate A's return
+    # lands on WRONG_SCREEN instead of root; if that's not caught, candidate B's click fires
+    # against whatever WRONG_SCREEN actually has at those coordinates instead of root's, and never
+    # gets a fair, uncorrupted attempt.
+    root = [
+        {"text": "A", "content_desc": "", "resource_id": "btn_a", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.returnverify.testapp"},
+        {"text": "B", "content_desc": "", "resource_id": "btn_b", "class_name": "TextView", "bounds": "[10,0][20,10]", "clickable": True, "enabled": True, "package_name": "com.returnverify.testapp"},
+    ]
+    leaf_a = [{"resource_id": "leaf_a_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,40][5,45]", "clickable": False, "enabled": True, "package_name": "com.returnverify.testapp"}]
+    leaf_b = [{"resource_id": "leaf_b_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,60][5,65]", "clickable": False, "enabled": True, "package_name": "com.returnverify.testapp"}]
+    wrong_screen = [{"resource_id": "wrong_screen_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,80][5,85]", "clickable": False, "enabled": True, "package_name": "com.returnverify.testapp"}]
+    # order: root, leaf_a (candidate A's destination), leaf_a again (_navigate_back's own
+    # look-back dump), wrong_screen (the verification dump: back navigation failed, still in-app
+    # but on the wrong screen), leaf_b (candidate B's destination, only reached if the corrective
+    # relaunch actually put root back on screen first), leaf_b again (_navigate_back), root
+    # (verification: this one succeeds)
+    service = build_service([root, leaf_a, leaf_a, wrong_screen, leaf_b, leaf_b, root])
+
+    result = service.run(MapperRunConfig(package_name="com.returnverify.testapp", mode=MapperMode.LIGHT))
+
+    assert service.ui.clicks == ["[0,0][10,10]", "[10,0][20,10]"]  # both A and B got a fair attempt
+    assert result["actions_executed"] == 2
+    assert result["screens_recorded"] == 3  # root, leaf_a, leaf_b; wrong_screen is never persisted
+    # one extra relaunch beyond the initial launch: the corrective recovery after A's bad return
+    assert service.navigation_context.prepared == ["com.returnverify.testapp", "com.returnverify.testapp"]
 
 
 def test_click_that_stays_in_the_target_app_is_recorded_normally() -> None:
@@ -279,7 +320,8 @@ def test_complement_deepens_light_session_to_medium_without_duplicating() -> Non
     light = build_service([ROOT_NODES, LEAF_NODES]).run(MapperRunConfig(package_name=package_name, mode=MapperMode.LIGHT))
     assert light["screens_recorded"] == 2
 
-    complement_service = build_service([ROOT_NODES, LEAF_NODES])
+    # trailing ROOT_NODES x2: same return-to-screen round trip as the fresh-run test above (#47)
+    complement_service = build_service([ROOT_NODES, LEAF_NODES, ROOT_NODES, ROOT_NODES])
     medium = complement_service.run(MapperRunConfig(package_name=package_name, mode=MapperMode.MEDIUM, complement=True))
 
     assert medium["session_id"] == light["session_id"]
@@ -459,20 +501,37 @@ def test_navigate_back_ignores_a_back_looking_button_from_another_package() -> N
 
 
 def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:
-    # root -> Profile A (first of its type, fully explored, its Connections link gets tried) and
-    # Profile B (same structure, different text: recognized as another instance, deduped)
-    dumps = [ROOT_TWO_PROFILES, _profile_dump("Alice")] + [[]] * 8 + [_profile_dump("Bob")] + [[]] * 8
+    # root -> Profile A (first of its type, fully explored: both its own name header and its
+    # Connections link are candidates, issue #37, the header is labeled even though it's not
+    # clickable) and Profile B (same structure, different text: recognized as another instance,
+    # deduped before either of its own candidates is ever tried)
+    header_dest = [{"resource_id": "header_dest_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": False, "enabled": True}]
+    connections_screen = [{"resource_id": "connections_screen", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": False, "enabled": True}]
+    alice = _profile_dump("Alice")
+    bob = _profile_dump("Bob")
+    # each candidate's round trip needs its own return-to-screen verification dump (issue #47):
+    # Alice's two candidates (her name header, then Connections) each need one to confirm landing
+    # back on Alice, and each of root's two candidates (Profile A, Profile B) needs one to confirm
+    # landing back on root; a screen's fingerprint is fixed at creation time, so these have to be
+    # the exact original dump, not a later variant of it
+    dumps = [
+        ROOT_TWO_PROFILES, alice,
+        header_dest, header_dest, alice,
+        connections_screen, connections_screen, alice,
+        alice, ROOT_TWO_PROFILES,
+        bob, bob, ROOT_TWO_PROFILES,
+    ]
     service = build_service(dumps)
 
     result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
 
-    assert result["screens_recorded"] == 3  # root, Alice, Bob: all recorded, coverage preserved
+    assert result["screens_recorded"] == 5  # root, Alice, her header's destination, Connections, Bob
     assert service.ui.clicks.count("[0,20][100,30]") == 1  # Connections: tried once (Alice), not for Bob
 
     with SessionLocal() as session:
         repository = SqlAlchemyMapperRepository(session)
-        screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, Bob
-        bob_screen = screens[2]
+        screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, header_dest, connections, Bob
+        bob_screen = screens[4]
         assert bob_screen.expanded is True  # deduped screens still end up expanded=True
         assert repository.list_actions(result["session_id"], screen_id=bob_screen.id) == []  # never got its own candidates tried
 
@@ -651,8 +710,13 @@ def test_scroll_and_interact_are_interleaved_not_scroll_then_click_at_the_end() 
 
     service = build_service([])
     service.ui = _EventLoggingUi([
-        root, after_scroll_1, dead_end, dead_end, after_scroll_2, dead_end, dead_end,
-        after_scroll_2, after_scroll_2, after_scroll_2,
+        # each "dead_end, dead_end, root" trio is one candidate's full round trip: the dead-end
+        # destination screen, _navigate_back's own look-back dump, and the post-return
+        # verification dump (issue #47), which must fingerprint-match `root` (the screen's
+        # identity is fixed at creation time, from this exact dump, scrolling in more content
+        # afterward never changes it) or a corrective relaunch would trigger
+        root, after_scroll_1, dead_end, dead_end, root, after_scroll_2, dead_end, dead_end,
+        root, after_scroll_2, after_scroll_2, after_scroll_2,
     ])
 
     service.run(MapperRunConfig(package_name="com.interleave.testapp", mode=MapperMode.LIGHT))
@@ -743,7 +807,9 @@ def test_remap_screen_forces_reexploration_of_an_expanded_screen(monkeypatch) ->
         session_id = mapper_session.id
         screen_id = target.id
 
-    service = build_service([target_dump, child_dump, target_dump])
+    # extra child_dump: _navigate_back's own look-back dump for the return-to-target trip after
+    # clicking "New Candidate" (issue #47); the final target_dump is that trip's verification
+    service = build_service([target_dump, child_dump, child_dump, target_dump])
 
     result = service.remap_screen(session_id, screen_id)
 
