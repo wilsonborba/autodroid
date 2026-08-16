@@ -182,8 +182,11 @@ def db_revision(message: str) -> None:
     command.revision(Config("alembic.ini"), message=message, autogenerate=True)
 
 
-@worker_app.command("serve-api")
+@app.command("serve-api")
 def serve_api(host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Starts the FastAPI/uvicorn server. A top-level command, not under `worker`: the API
+    server and the worker/dispatcher (`worker run`) are two separate processes the user runs
+    side by side, and this one never touches the dispatcher, so it shouldn't read as if it did."""
     import uvicorn
 
     uvicorn.run(create_api_app(), host=host, port=port)
