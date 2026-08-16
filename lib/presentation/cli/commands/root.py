@@ -172,15 +172,18 @@ def worker_status(as_json: bool = False) -> None:
         typer.echo(str(payload))
 
 
+ALEMBIC_INI_PATH = "lib/dal/alembic.ini"
+
+
 @db_app.command("upgrade")
 def db_upgrade(revision: str = "head") -> None:
-    command.upgrade(Config("alembic.ini"), revision)
+    command.upgrade(Config(ALEMBIC_INI_PATH), revision)
     typer.echo(f"Database upgraded to {revision}")
 
 
 @db_app.command("revision")
 def db_revision(message: str) -> None:
-    command.revision(Config("alembic.ini"), message=message, autogenerate=True)
+    command.revision(Config(ALEMBIC_INI_PATH), message=message, autogenerate=True)
 
 
 DEFAULT_API_PORT = 8000

@@ -5,7 +5,12 @@ from logging.config import fileConfig
 from alembic import context
 
 from lib.dal.local.database import Base, engine
-from lib.domain.models import job_model, worker_state_model  # noqa: F401
+from lib.domain.models import job_model, worker_state_model
+
+# imported for their side effect (registering their tables on Base.metadata before
+# `db revision --autogenerate` diffs against it), not used directly; the `# noqa: F401` this
+# used to carry only silences flake8, not pyflakes, so reference them explicitly instead
+_imported_for_autogenerate = (job_model, worker_state_model)
 
 config = context.config
 

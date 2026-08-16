@@ -33,7 +33,7 @@ def load_settings() -> Settings:
     return Settings(
         app_name=os.getenv("AUTODROID_APP_NAME", "autodroid"),
         debug=os.getenv("AUTODROID_DEBUG", "false").lower() == "true",
-        database_url=os.getenv("AUTODROID_DATABASE_URL", "sqlite:///./var/autodroid.db"),
+        database_url=os.getenv("AUTODROID_DATABASE_URL", "sqlite:///./lib/dal/var/autodroid.db"),
         worker_name=os.getenv("AUTODROID_WORKER_NAME", "main"),
         queue_poll_interval_seconds=float(os.getenv("AUTODROID_QUEUE_POLL_INTERVAL_SECONDS", "2.0")),
         output_dir=Path(os.getenv("AUTODROID_OUTPUT_DIR", "output")),
