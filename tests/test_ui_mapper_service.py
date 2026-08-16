@@ -110,6 +110,7 @@ def build_service(dumps: list[list[dict]]) -> UiMapperService:
     service.mode_service = MapperModeService()
     service.fingerprint_service = MapperFingerprintService()
     service.safety_service = MapperSafetyService()
+    service.REPLAY_CLICK_SETTLE_SECONDS = 0  # no real waiting in tests (issue #48)
     return service
 
 
@@ -276,6 +277,21 @@ def test_return_to_screen_recovers_via_relaunch_when_back_navigation_lands_somew
     assert result["screens_recorded"] == 3  # root, leaf_a, leaf_b; wrong_screen is never persisted
     # one extra relaunch beyond the initial launch: the corrective recovery after A's bad return
     assert service.navigation_context.prepared == ["com.returnverify.testapp", "com.returnverify.testapp"]
+
+
+def test_replay_bounds_waits_for_the_screen_to_settle_between_clicks(monkeypatch) -> None:
+    # issue #48: firing replay clicks back-to-back with no wait routinely missed a still-loading
+    # target partway through a long chain, derailing the whole recovery attempt (reproduced live:
+    # the exact same relaunch+replay sequence looping forever, never landing correctly)
+    service = build_service([])
+    service.REPLAY_CLICK_SETTLE_SECONDS = 1.5
+    sleeps: list[float] = []
+    monkeypatch.setattr("lib.domain.services.ui_mapper_service.time.sleep", sleeps.append)
+
+    service._replay_bounds(["[0,0][10,10]", "[10,0][20,10]", "[20,0][30,10]"])
+
+    assert service.ui.clicks == ["[0,0][10,10]", "[10,0][20,10]", "[20,0][30,10]"]
+    assert sleeps == [1.5, 1.5, 1.5]  # one settle wait after every click, not just at the end
 
 
 def test_click_that_stays_in_the_target_app_is_recorded_normally() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,6 +48,15 @@ class UiMapperService(MapperEngine):
     the checkpoint (`explored_up_to_depth`), without the complexity of maintaining a separate
     frontier/path-replay structure.
     """
+
+    # a settle wait between each click of a replay chain (issue #48): a screen transition takes
+    # a moment to render, and firing the next click immediately can land on still-loading or
+    # mid-transition content, missing the intended target. Harmless on a short chain, but deep
+    # mode's unbounded depth (#36) makes long replay chains routine, and one bad click partway
+    # through derails everything after it, an entire relaunch+replay attempt for nothing. A fixed
+    # per-app timezone-independent wait, deliberately generous: replay only runs on recovery
+    # paths (already the slow, exceptional case), never on the normal forward exploration loop.
+    REPLAY_CLICK_SETTLE_SECONDS = 1.5
 
     def __init__(self, settings: Settings) -> None:
         self.logger = get_logger(__name__)
@@ -224,6 +234,7 @@ class UiMapperService(MapperEngine):
                     raise ValueError(f"Restart step {step.id} has no text candidates")
                 if not self.ui.click_first_by_text_or_description(*candidates):
                     raise ValueError(f"Failed to replay restart step {step.id} to reach screen {screen_id}")
+                time.sleep(self.REPLAY_CLICK_SETTLE_SECONDS)  # issue #48: let the screen settle before the next replay click
 
             repository.reset_screen_expanded(screen_id)
             mapper_session.status = MapperSessionStatus.RUNNING
@@ -697,8 +708,7 @@ class UiMapperService(MapperEngine):
         else:
             self.logger.warning("Relaunching %s and replaying %s step(s) back to the current screen after leaving the app", package_name, len(ancestor_bounds))
             self.navigation_context.prepare_fresh_app_launch(package_name)
-            for bounds in ancestor_bounds:
-                self.ui.click_bounds(bounds)
+            self._replay_bounds(ancestor_bounds)
 
         if expected_fingerprint is None:
             return
@@ -712,8 +722,15 @@ class UiMapperService(MapperEngine):
             departed,
         )
         self.navigation_context.prepare_fresh_app_launch(package_name)
+        self._replay_bounds(ancestor_bounds)
+
+    def _replay_bounds(self, ancestor_bounds: list[str]) -> None:
+        """Clicks each recorded bounds in order, waiting for the screen to settle between clicks
+        (issue #48): fired back-to-back with no wait, a long replay chain routinely misses a
+        still-loading target partway through and derails everything after it."""
         for bounds in ancestor_bounds:
             self.ui.click_bounds(bounds)
+            time.sleep(self.REPLAY_CLICK_SETTLE_SECONDS)
 
     def _extract_candidates(self, nodes: list[dict[str, Any]], package_name: str) -> list[MapperActionCandidate]:
         # clickable="false" is not trusted on its own (issue #37): LinkedIn (and apparently other
