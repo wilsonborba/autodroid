@@ -85,7 +85,7 @@ autodroid worker run --iterations 1
 Subir API local:
 
 ```bash
-autodroid worker serve-api --host 127.0.0.1 --port 8000
+autodroid serve-api --host 127.0.0.1 --port 8000
 ```
 
 Rotas iniciais:
