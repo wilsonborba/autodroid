@@ -565,6 +565,54 @@ def test_navigate_back_ignores_a_back_looking_button_from_another_package() -> N
     assert service.adb.back_calls == 1
 
 
+def test_navigate_back_treats_cancel_as_a_valid_return_affordance() -> None:
+    screen_with_cancel = [{"text": "Cancel", "content_desc": "", "resource_id": "cancel_button", "class_name": "TextView", "bounds": "[10,10][20,20]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+    service = build_service([screen_with_cancel])
+
+    service._navigate_back("com.target.testapp")
+
+    assert service.ui.clicks == ["[10,10][20,20]"]
+    assert service.adb.back_calls == 0
+
+
+def test_return_to_screen_persists_successful_system_back_as_a_known_return_edge() -> None:
+    service = build_service([IN_APP_ROOT, IN_APP_LEAF, IN_APP_LEAF, IN_APP_ROOT])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])
+        root = next(screen for screen in screens if screen.depth == 0)
+        leaf = next(screen for screen in screens if screen.depth == 1)
+        known_return = repository.find_known_return_action(result["session_id"], leaf.id, root.id)
+        assert known_return is not None
+        assert known_return.action_type == "system_back"
+        transition = repository.find_transition_by_action(known_return.id)
+        assert transition is not None
+        assert transition.from_screen_id == leaf.id
+        assert transition.to_screen_id == root.id
+
+
+def test_return_to_screen_reuses_a_known_in_app_return_action_before_generic_back() -> None:
+    root_dump = [{"text": "Root", "content_desc": "", "resource_id": "root", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
+    modal_dump = [{"text": "Modal", "content_desc": "", "resource_id": "modal", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
+    service = build_service([modal_dump, root_dump])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.target.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(root_dump, "com.target.testapp"), structural_signature=service.fingerprint_service.structural_signature(root_dump, "com.target.testapp"), screen_key="root", depth=0, ordinal=0)
+        modal = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(modal_dump, "com.target.testapp"), structural_signature=service.fingerprint_service.structural_signature(modal_dump, "com.target.testapp"), screen_key="modal", depth=1, ordinal=1)
+        action = repository.create_action(session_id=mapper_session.id, screen_id=modal.id, node_id=None, action_key="return:click:[9,9][10,10]", action_type="click", label="Close", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[9,9][10,10]"})
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=modal.id, action_id=action.id, to_screen_id=root.id, result_type="clicked", metadata_json={"navigation_kind": "return_action"})
+        session.commit()
+        service._return_to_screen(repository, mapper_session.id, "com.target.testapp", [], departed=False, expected_screen_id=root.id, expected_fingerprint=root.fingerprint)
+
+    assert service.ui.clicks == ["[9,9][10,10]"]
+    assert service.adb.back_calls == 0
+
+
 def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:
     # root -> Profile A (first of its type, fully explored: both its own name header and its
     # Connections link are candidates, issue #37, the header is labeled even though it's not
@@ -598,7 +646,8 @@ def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> No
         screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, header_dest, connections, Bob
         bob_screen = screens[4]
         assert bob_screen.expanded is True  # deduped screens still end up expanded=True
-        assert repository.list_actions(result["session_id"], screen_id=bob_screen.id) == []  # never got its own candidates tried
+        forward_actions = [action for action in repository.list_actions(result["session_id"], screen_id=bob_screen.id) if not action.action_key.startswith("return:")]
+        assert forward_actions == []  # never got its own candidates tried
 
 
 def _fixed_content_dump(section_text: str) -> list[dict]:

@@ -334,7 +334,12 @@ class UiMapperService(MapperEngine):
                     if self.ui.click_bounds(node.bounds):
                         replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [node.bounds])
                         if self._should_unwind_after_action(repository, from_screen_id=screen.id, to_screen_id=replay_to_screen_id, action=action):
-                            self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                            self._return_to_screen(
+                                repository, session_id, package_name, ancestor_bounds,
+                                departed=replay_to_screen_id is None,
+                                expected_screen_id=screen.id,
+                                expected_fingerprint=screen.fingerprint,
+                            )
                         else:
                             self.logger.debug(
                                 "Staying inside navigation context after replaying %r on screen %s",
@@ -479,7 +484,12 @@ class UiMapperService(MapperEngine):
             current_nodes = self.ui.dump_nodes()
 
             if self._left_target_app(current_nodes, package_name):
-                self._return_to_screen(package_name, ancestor_bounds, departed=True, expected_fingerprint=screen.fingerprint)
+                self._return_to_screen(
+                    repository, session_id, package_name, ancestor_bounds,
+                    departed=True,
+                    expected_screen_id=screen.id,
+                    expected_fingerprint=screen.fingerprint,
+                )
                 break
 
             new_nodes_found = False
@@ -556,7 +566,12 @@ class UiMapperService(MapperEngine):
                     if self.ui.click_bounds(existing_node.bounds):
                         replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
                         if self._should_unwind_after_action(repository, from_screen_id=screen.id, to_screen_id=replay_to_screen_id, action=existing_action, node=existing_node):
-                            self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                            self._return_to_screen(
+                                repository, session_id, package_name, ancestor_bounds,
+                                departed=replay_to_screen_id is None,
+                                expected_screen_id=screen.id,
+                                expected_fingerprint=screen.fingerprint,
+                            )
                         else:
                             self.logger.debug(
                                 "Staying inside navigation context after replaying known action %r on screen %s",
@@ -617,7 +632,12 @@ class UiMapperService(MapperEngine):
                     metadata_json={"navigation_kind": navigation_kind},
                 )
                 if self._should_unwind_after_action(repository, from_screen_id=screen.id, to_screen_id=to_screen_id, action=action, node=candidate.node):
-                    self._return_to_screen(package_name, ancestor_bounds, departed=to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                    self._return_to_screen(
+                        repository, session_id, package_name, ancestor_bounds,
+                        departed=to_screen_id is None,
+                        expected_screen_id=screen.id,
+                        expected_fingerprint=screen.fingerprint,
+                    )
                 else:
                     self.logger.debug(
                         "Staying inside navigation context after %r on screen %s (kind=%s)",
@@ -727,7 +747,7 @@ class UiMapperService(MapperEngine):
             return None
         return repository.get_node(action.node_id)
 
-    BACK_LABELS = {"back", "navigate up", "go back", "up", "close"}
+    BACK_LABELS = {"back", "navigate up", "go back", "up", "close", "cancel", "dismiss"}
     BACK_RESOURCE_ID_HINTS = ("back_button", "btn_back", "toolbar_back", "nav_back", "back_arrow", ":id/back")
 
     def _find_back_affordance(self, nodes: list[dict[str, Any]], package_name: str) -> dict[str, Any] | None:
@@ -743,23 +763,35 @@ class UiMapperService(MapperEngine):
                 return node
         return None
 
-    def _navigate_back(self, package_name: str) -> None:
+    def _navigate_back(self, package_name: str, *, nodes: list[dict[str, Any]] | None = None) -> tuple[str, dict[str, Any] | None]:
         """The system back button is context-dependent and not always safe during exploration:
         pressed from the app's own root it can exit to the home screen or a previous app instead
         of just closing the current screen, silently taking the Mapper out of the target app.
         An in-app back/up/close affordance, when the current screen has one, does what we
         actually mean ("undo this last navigation") without that risk; the system back button is
         only used when no such affordance is found."""
-        nodes = self.ui.dump_nodes()
+        nodes = nodes if nodes is not None else self.ui.dump_nodes()
         back_node = self._find_back_affordance(nodes, package_name)
         if back_node is not None:
             self.logger.debug("Navigating back via in-app affordance %r", back_node.get("content_desc") or back_node.get("text"))
             self.ui.click_bounds(back_node["bounds"])
+            return "in_app_affordance", back_node
         else:
             self.logger.debug("Navigating back via the system back button: no in-app back/up/close affordance found")
             self.adb.press_back()
+            return "system_back", None
 
-    def _return_to_screen(self, package_name: str, ancestor_bounds: list[str], *, departed: bool, expected_fingerprint: str | None = None) -> None:
+    def _return_to_screen(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        package_name: str,
+        ancestor_bounds: list[str],
+        *,
+        departed: bool,
+        expected_screen_id: int | None = None,
+        expected_fingerprint: str | None = None,
+    ) -> None:
         """Undoes the click that was just made, one way or another, so the caller's own screen
         is current again and its remaining candidates can keep being tried.
 
@@ -785,8 +817,22 @@ class UiMapperService(MapperEngine):
         one corrective relaunch + full replay, the same reliable recovery already used when the
         app was fully left, since simply retrying "back" has no way to fix a wrong state it
         already produced."""
+        current_screen_id: int | None = None
+        current_nodes: list[dict[str, Any]] | None = None
+        return_strategy = "restart"
+        return_node: dict[str, Any] | None = None
         if not departed:
-            self._navigate_back(package_name)
+            current_nodes = self.ui.dump_nodes()
+            if not self._left_target_app(current_nodes, package_name):
+                current_fingerprint = self.fingerprint_service.fingerprint(current_nodes, package_name)
+                current_screen = repository.find_screen_by_fingerprint(session_id, current_fingerprint)
+                current_screen_id = current_screen.id if current_screen is not None else None
+            if current_screen_id is not None and expected_screen_id is not None and current_screen_id == expected_screen_id:
+                return
+            if current_screen_id is not None and expected_screen_id is not None and self._execute_known_return(repository, session_id, current_screen_id, expected_screen_id):
+                return_strategy = "known_return"
+            else:
+                return_strategy, return_node = self._navigate_back(package_name, nodes=current_nodes)
         else:
             self.logger.warning("Relaunching %s and replaying %s step(s) back to the current screen after leaving the app", package_name, len(ancestor_bounds))
             self.navigation_context.prepare_fresh_app_launch(package_name)
@@ -798,6 +844,14 @@ class UiMapperService(MapperEngine):
         nodes = self.ui.dump_nodes()
         landed_fingerprint = None if self._left_target_app(nodes, package_name) else self.fingerprint_service.fingerprint(nodes, package_name)
         if landed_fingerprint == expected_fingerprint:
+            if return_strategy != "restart" and current_screen_id is not None and expected_screen_id is not None:
+                self._persist_successful_return(
+                    repository, session_id,
+                    from_screen_id=current_screen_id,
+                    to_screen_id=expected_screen_id,
+                    strategy=return_strategy,
+                    return_node=return_node,
+                )
             return
         self.logger.warning(
             "Return-to-screen landed somewhere unexpected (departed=%s), forcing a relaunch and full replay to recover",
@@ -805,6 +859,80 @@ class UiMapperService(MapperEngine):
         )
         self.navigation_context.prepare_fresh_app_launch(package_name)
         self._replay_bounds(ancestor_bounds)
+
+    def _execute_known_return(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        from_screen_id: int,
+        to_screen_id: int,
+    ) -> bool:
+        action = repository.find_known_return_action(session_id, from_screen_id, to_screen_id)
+        if action is None:
+            return False
+        self.logger.debug("Reusing known return action %s from screen %s to %s", action.id, from_screen_id, to_screen_id)
+        metadata = action.metadata_json or {}
+        if action.action_type == "system_back":
+            self.adb.press_back()
+            return True
+        bounds = metadata.get("bounds")
+        if bounds:
+            return self.ui.click_bounds(bounds)
+        if action.node_id is not None:
+            node = repository.get_node(action.node_id)
+            if node is not None and node.bounds:
+                return self.ui.click_bounds(node.bounds)
+        return False
+
+    def _persist_successful_return(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        *,
+        from_screen_id: int,
+        to_screen_id: int,
+        strategy: str,
+        return_node: dict[str, Any] | None,
+    ) -> None:
+        if repository.find_known_return_action(session_id, from_screen_id, to_screen_id) is not None:
+            return
+        if strategy == "system_back":
+            action_key = "return:system_back"
+            action_type = "system_back"
+            label = "System back"
+            metadata_json = {"return_kind": strategy}
+        else:
+            bounds = None if return_node is None else return_node.get("bounds")
+            if not bounds:
+                return
+            action_key = f"return:click:{bounds}"
+            action_type = "click"
+            label = return_node.get("content_desc") or return_node.get("text") or "Return"
+            metadata_json = {"return_kind": strategy, "bounds": bounds}
+        action = repository.find_action_by_key(session_id, from_screen_id, action_key)
+        if action is None:
+            action = repository.create_action(
+                session_id=session_id,
+                screen_id=from_screen_id,
+                node_id=None,
+                action_key=action_key,
+                action_type=action_type,
+                label=label,
+                safety=MapperActionSafety.SAFE,
+                executed=True,
+                success=True,
+                metadata_json=metadata_json,
+            )
+        existing_transition = repository.find_transition_by_action(action.id)
+        if existing_transition is None:
+            repository.create_transition(
+                session_id=session_id,
+                from_screen_id=from_screen_id,
+                action_id=action.id,
+                to_screen_id=to_screen_id,
+                result_type="clicked",
+                metadata_json={"navigation_kind": "return_action"},
+            )
 
     def _replay_bounds(self, ancestor_bounds: list[str]) -> None:
         """Clicks each recorded bounds in order, waiting for the screen to settle between clicks
