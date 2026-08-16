@@ -16,6 +16,8 @@ from lib.domain.models.mapper_types import MapperActionSafety, MapperLimits, Map
 from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
+from lib.domain.services.mapper_route_planner_service import RESTART, MapperRoutePlannerService, RestartOption
+from lib.domain.services.mapper_route_graph import build_adjacency, dijkstra_shortest_path
 from lib.domain.services.mapper_safety_service import MapperSafetyService
 from lib.domain.services.navigation_context_service import NavigationContextService
 
@@ -27,6 +29,16 @@ class MapperActionCandidate:
     bounds: str | None
     node: dict[str, Any]
     node_key: str
+
+
+@dataclass
+class MapperFrontierItem:
+    screen_id: int
+    depth: int
+    completion_state: MapperScreenCompletionState
+    strategy_type: str
+    estimated_duration_ms: float
+    reason: str
 
 
 class UiMapperService(MapperEngine):
@@ -152,12 +164,24 @@ class UiMapperService(MapperEngine):
 
         state = self._load_state(repository, mapper_session.id)
         visited_this_pass: set[int] = set()
-        self._explore(
+        current_screen_id = self._explore(
             repository,
             mapper_session.id,
             depth=0,
             state=state,
             visited_this_pass=visited_this_pass,
+            max_depth=target_max_depth,
+            max_actions=mapper_session.max_actions,
+            max_scrolls=mapper_session.max_scrolls,
+            max_consecutive_empty_scrolls=mapper_session.max_consecutive_empty_scrolls,
+            config_skip_dangerous_actions=config.skip_dangerous_actions,
+            package_name=config.package_name,
+        )
+        self._drain_exploration_frontier(
+            repository,
+            mapper_session.id,
+            state=state,
+            current_screen_id=current_screen_id,
             max_depth=target_max_depth,
             max_actions=mapper_session.max_actions,
             max_scrolls=mapper_session.max_scrolls,
@@ -197,6 +221,169 @@ class UiMapperService(MapperEngine):
             "scrolls_used": 0,
             "revisited_screens": sum(1 for screen in screens if screen.visit_count > 1),
         }
+
+    def _drain_exploration_frontier(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        *,
+        state: dict[str, int],
+        current_screen_id: int | None,
+        max_depth: int,
+        max_actions: int,
+        max_scrolls: int,
+        max_consecutive_empty_scrolls: int,
+        config_skip_dangerous_actions: bool,
+        package_name: str,
+    ) -> None:
+        while True:
+            frontier = self._build_exploration_frontier(
+                repository,
+                session_id,
+                current_screen_id=current_screen_id,
+                max_depth=max_depth,
+            )
+            if not frontier:
+                return
+            target = frontier[0]
+            self.logger.info(
+                "Mapper frontier selected screen %s (state=%s strategy=%s estimated_ms=%.0f reason=%s)",
+                target.screen_id,
+                target.completion_state.value,
+                target.strategy_type,
+                target.estimated_duration_ms,
+                target.reason,
+            )
+            if target.screen_id != current_screen_id and not self._navigate_to_screen(
+                repository,
+                session_id,
+                package_name,
+                current_screen_id=current_screen_id,
+                target_screen_id=target.screen_id,
+            ):
+                repository.set_screen_completion_state(target.screen_id, MapperScreenCompletionState.RESUME_NEEDED)
+                repository.session.commit()
+                return
+            target_screen = repository.get_screen(target.screen_id)
+            if target_screen is None:
+                return
+            visited_this_pass: set[int] = set()
+            current_screen_id = self._explore(
+                repository,
+                session_id,
+                depth=target_screen.depth,
+                state=state,
+                visited_this_pass=visited_this_pass,
+                max_depth=max_depth,
+                max_actions=max_actions,
+                max_scrolls=max_scrolls,
+                max_consecutive_empty_scrolls=max_consecutive_empty_scrolls,
+                config_skip_dangerous_actions=config_skip_dangerous_actions,
+                package_name=package_name,
+            )
+
+    def _build_exploration_frontier(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        *,
+        current_screen_id: int | None,
+        max_depth: int,
+    ) -> list[MapperFrontierItem]:
+        frontier: list[MapperFrontierItem] = []
+        for screen in repository.list_screens(session_id):
+            completion_state = repository.get_screen_completion_state(screen.id)
+            if screen.depth >= max_depth:
+                continue
+            if completion_state not in (MapperScreenCompletionState.PENDING, MapperScreenCompletionState.RESUME_NEEDED):
+                continue
+            if completion_state == MapperScreenCompletionState.PENDING and not screen.expanded:
+                continue
+            frontier.append(
+                self._frontier_item_for_screen(
+                    repository,
+                    session_id,
+                    current_screen_id=current_screen_id,
+                    screen_id=screen.id,
+                    completion_state=completion_state,
+                )
+            )
+        frontier.sort(key=lambda item: (item.estimated_duration_ms, 0 if item.completion_state == MapperScreenCompletionState.RESUME_NEEDED else 1, item.depth, item.screen_id))
+        return frontier
+
+    def _frontier_item_for_screen(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        *,
+        current_screen_id: int | None,
+        screen_id: int,
+        completion_state: MapperScreenCompletionState,
+    ) -> MapperFrontierItem:
+        screen = repository.get_screen(screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        if current_screen_id is None or current_screen_id == screen_id:
+            return MapperFrontierItem(
+                screen_id=screen.id,
+                depth=screen.depth,
+                completion_state=completion_state,
+                strategy_type="in_place",
+                estimated_duration_ms=0.0,
+                reason="already_at_target" if current_screen_id == screen_id else "frontier_resume",
+            )
+        restart_action_ids = [action_id for action_id in self._restart_action_ids(repository, screen.id) if action_id is not None]
+        plan = MapperRoutePlannerService(repository.session).plan(
+            session_id=session_id,
+            current_screen_id=current_screen_id,
+            target_screen_id=screen.id,
+            restart_option=RestartOption(
+                root_screen_id=self._root_screen_id(repository, screen.id),
+                ancestor_step_ids=restart_action_ids,
+            ),
+        )
+        return MapperFrontierItem(
+            screen_id=screen.id,
+            depth=screen.depth,
+            completion_state=completion_state,
+            strategy_type=plan.strategy_type,
+            estimated_duration_ms=plan.estimated_duration_ms,
+            reason=plan.reason,
+        )
+
+    def _navigate_to_screen(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        package_name: str,
+        *,
+        current_screen_id: int | None,
+        target_screen_id: int,
+    ) -> bool:
+        if current_screen_id == target_screen_id:
+            return True
+        target_screen = repository.get_screen(target_screen_id)
+        if target_screen is None:
+            return False
+        restart_action_ids = [action_id for action_id in self._restart_action_ids(repository, target_screen_id) if action_id is not None]
+        planner = MapperRoutePlannerService(repository.session)
+        plan = planner.plan(
+            session_id=session_id,
+            current_screen_id=current_screen_id if current_screen_id is not None else target_screen_id,
+            target_screen_id=target_screen_id,
+            restart_option=RestartOption(
+                root_screen_id=self._root_screen_id(repository, target_screen_id),
+                ancestor_step_ids=restart_action_ids,
+            ),
+        )
+        started = time.monotonic()
+        if plan.strategy_type == RESTART:
+            self.navigation_context.prepare_fresh_app_launch(package_name)
+            success = self._execute_action_ids(repository, restart_action_ids) and self._screen_matches(package_name, target_screen.fingerprint)
+        else:
+            success = self._execute_route(repository, plan.route) and self._screen_matches(package_name, target_screen.fingerprint)
+        planner.record_execution(plan, actual_duration_ms=(time.monotonic() - started) * 1000, success=success)
+        return success
 
     @staticmethod
     def _reused_session_result(mapper_session: MapperSession) -> dict[str, Any]:
@@ -361,6 +548,21 @@ class UiMapperService(MapperEngine):
             )
             return screen.id
 
+        canonical_screen = repository.find_screen_by_structural_signature(session_id, structural_signature)
+        if canonical_screen is not None:
+            repository.increment_screen_visit_count(canonical_screen.id)
+            repository.record_screen_observation(canonical_screen.id, fingerprint)
+            state["revisited_screens"] += 1
+            repository.session.commit()
+            if canonical_screen.id in visited_this_pass:
+                return canonical_screen.id
+            visited_this_pass.add(canonical_screen.id)
+            self.logger.info(
+                "Structural screen %s matched canonical screen %s; reusing canonical persistence instead of creating a duplicate screen row",
+                structural_signature[:12], canonical_screen.id,
+            )
+            return canonical_screen.id
+
         screen = repository.create_screen(
             session_id=session_id,
             fingerprint=fingerprint,
@@ -368,7 +570,13 @@ class UiMapperService(MapperEngine):
             screen_key=f"screen-{state['screens_recorded'] + 1}",
             depth=depth,
             ordinal=state["screens_recorded"],
-            metadata_json={"node_count": len(nodes), "navigation_context": structural_signature, "completion_state": MapperScreenCompletionState.PENDING.value},
+            metadata_json={
+                "node_count": len(nodes),
+                "navigation_context": structural_signature,
+                "completion_state": MapperScreenCompletionState.PENDING.value,
+                "observed_fingerprints": [fingerprint],
+                "observation_count": 1,
+            },
         )
         state["screens_recorded"] += 1
         node_id_by_key = {}
@@ -869,8 +1077,113 @@ class UiMapperService(MapperEngine):
         )
         if current_screen_id is not None:
             repository.set_screen_completion_state(current_screen_id, MapperScreenCompletionState.RESUME_NEEDED)
+        if current_screen_id is not None and expected_screen_id is not None and self._recover_via_planner(
+            repository, session_id, package_name,
+            current_screen_id=current_screen_id,
+            target_screen_id=expected_screen_id,
+            ancestor_bounds=ancestor_bounds,
+        ):
+            return
         self.navigation_context.prepare_fresh_app_launch(package_name)
         self._replay_bounds(ancestor_bounds)
+
+    def _recover_via_planner(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        package_name: str,
+        *,
+        current_screen_id: int,
+        target_screen_id: int,
+        ancestor_bounds: list[str],
+    ) -> bool:
+        target_screen = repository.get_screen(target_screen_id)
+        if target_screen is None:
+            return False
+        restart_action_ids = [action_id for action_id in self._restart_action_ids(repository, target_screen_id) if action_id is not None]
+        planner = MapperRoutePlannerService(repository.session)
+        plan = planner.plan(
+            session_id=session_id,
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            restart_option=RestartOption(root_screen_id=self._root_screen_id(repository, target_screen_id), ancestor_step_ids=restart_action_ids),
+        )
+        self.logger.debug(
+            "Mapper recovery planner chose %s (%s) for %s -> %s",
+            plan.strategy_type, plan.reason, current_screen_id, target_screen_id,
+        )
+        started = time.monotonic()
+        success = False
+        if plan.strategy_type == RESTART:
+            self.navigation_context.prepare_fresh_app_launch(package_name)
+            self._replay_bounds(ancestor_bounds)
+            success = True
+        else:
+            success = self._execute_route(repository, plan.route) and self._screen_matches(package_name, target_screen.fingerprint)
+        planner.record_execution(plan, actual_duration_ms=(time.monotonic() - started) * 1000, success=success)
+        return success
+
+    def _execute_route(self, repository: SqlAlchemyMapperRepository, route: list[Any]) -> bool:
+        for transition in route:
+            action = repository.get_action(transition.action_id)
+            if action is None:
+                return False
+            if not self._execute_action(repository, action):
+                return False
+        return True
+
+    def _execute_action_ids(self, repository: SqlAlchemyMapperRepository, action_ids: list[int]) -> bool:
+        for action_id in action_ids:
+            action = repository.get_action(action_id)
+            if action is None or not self._execute_action(repository, action):
+                return False
+        return True
+
+    def _execute_action(self, repository: SqlAlchemyMapperRepository, action: Any) -> bool:
+        if action.action_type == "system_back":
+            self.adb.press_back()
+            return True
+        metadata = action.metadata_json or {}
+        bounds = metadata.get("bounds")
+        if bounds:
+            return self.ui.click_bounds(bounds)
+        if action.node_id is not None:
+            node = repository.get_node(action.node_id)
+            if node is not None and node.bounds:
+                return self.ui.click_bounds(node.bounds)
+        return False
+
+    def _screen_matches(self, package_name: str, expected_fingerprint: str) -> bool:
+        nodes = self.ui.dump_nodes()
+        if self._left_target_app(nodes, package_name):
+            return False
+        return self.fingerprint_service.fingerprint(nodes, package_name) == expected_fingerprint
+
+    def _restart_action_ids(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> list[int]:
+        route = self._best_restart_route(repository, target_screen_id)
+        return [transition.action_id for transition in route if transition.action_id is not None]
+
+    def _root_screen_id(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> int:
+        route = self._best_restart_route(repository, target_screen_id)
+        if route:
+            return route[0].from_screen_id
+        return target_screen_id
+
+    def _best_restart_route(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> list[Any]:
+        target_screen = repository.get_screen(target_screen_id)
+        if target_screen is None:
+            return []
+        transitions = repository.list_transitions(target_screen.session_id)
+        adjacency = build_adjacency(transitions)
+        root_screens = sorted((screen for screen in repository.list_screens(target_screen.session_id) if screen.depth == 0), key=lambda screen: (screen.ordinal, screen.id))
+        best_route: list[Any] | None = None
+        for root_screen in root_screens:
+            route = dijkstra_shortest_path(adjacency, root_screen.id, target_screen_id, lambda transition: 1.0)
+            if route is None:
+                continue
+            if best_route is None or len(route) < len(best_route):
+                best_route = route
+        return best_route or []
 
     def _execute_known_return(
         self,
