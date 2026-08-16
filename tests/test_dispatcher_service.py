@@ -125,3 +125,45 @@ def test_run_once_is_idle_when_there_is_nothing_to_claim() -> None:
     outcome = dispatcher.run_once()
 
     assert outcome == {"worker": WORKER_NAME, "status": "idle"}
+
+
+def _orphan_a_job(job_id: int) -> None:
+    with SessionLocal() as session:
+        queue = JobQueueService(session, ZoneInfo("UTC"))
+        claimed = queue.claim_next_job()  # simulates a previous dispatcher claiming it
+        assert claimed.id == job_id
+        session.commit()
+    # ... then that process died: nothing ever marks it completed/failed, it's stuck RUNNING
+
+
+def test_reconcile_orphaned_jobs_resets_running_jobs_to_scheduled() -> None:
+    # issue #49: a job left RUNNING by a dispatcher process that died mid-job must become
+    # claimable again once a fresh dispatcher starts, not stay stuck forever
+    reset_db()
+    job_id = _create_job("test.a")
+    _orphan_a_job(job_id)
+
+    dispatcher = _build_dispatcher(AutomationRegistryService())
+    dispatcher.reconcile_orphaned_jobs()
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job.status == JobStatus.SCHEDULED
+
+
+def test_run_loop_reconciles_orphaned_jobs_before_the_first_poll() -> None:
+    # the reconciliation has to happen in time for the very first iteration to pick the job back
+    # up, not just eventually
+    reset_db()
+    job_id = _create_job("test.ok")
+    _orphan_a_job(job_id)
+
+    registry = AutomationRegistryService()
+    registry.register("test.ok", lambda job: {"ok": True})
+    dispatcher = _build_dispatcher(registry)
+
+    dispatcher.run_loop(iterations=1)
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job.status == JobStatus.COMPLETED
