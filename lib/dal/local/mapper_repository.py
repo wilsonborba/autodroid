@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from lib.domain.models.mapper_model import MapperAction, MapperNode, MapperScreen, MapperSession, MapperTransition
-from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperSessionStatus
+from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperScreenCompletionState, MapperSessionStatus
 
 
 class SqlAlchemyMapperRepository:
@@ -132,6 +132,9 @@ class SqlAlchemyMapperRepository:
         if screen is None:
             raise ValueError(f"Mapper screen {screen_id} not found")
         screen.expanded = True
+        metadata = dict(screen.metadata_json or {})
+        metadata.setdefault("completion_state", MapperScreenCompletionState.CONTENT_COMPLETE.value)
+        screen.metadata_json = metadata
         self.session.flush()
         return screen
 
@@ -140,6 +143,30 @@ class SqlAlchemyMapperRepository:
         if screen is None:
             raise ValueError(f"Mapper screen {screen_id} not found")
         screen.expanded = False
+        metadata = dict(screen.metadata_json or {})
+        metadata["completion_state"] = MapperScreenCompletionState.PENDING.value
+        screen.metadata_json = metadata
+        self.session.flush()
+        return screen
+
+    def get_screen_completion_state(self, screen_id: int) -> MapperScreenCompletionState:
+        screen = self.session.get(MapperScreen, screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        value = (screen.metadata_json or {}).get("completion_state", MapperScreenCompletionState.PENDING.value)
+        return MapperScreenCompletionState(value)
+
+    def set_screen_completion_state(self, screen_id: int, state: MapperScreenCompletionState) -> MapperScreen:
+        screen = self.session.get(MapperScreen, screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        metadata = dict(screen.metadata_json or {})
+        metadata["completion_state"] = state.value
+        screen.metadata_json = metadata
+        if state in (MapperScreenCompletionState.CONTENT_COMPLETE, MapperScreenCompletionState.COMPLETE):
+            screen.expanded = True
+        elif state == MapperScreenCompletionState.PENDING:
+            screen.expanded = False
         self.session.flush()
         return screen
 

@@ -23,6 +23,13 @@ class MapperActionSafety(str, Enum):
     DANGEROUS = "dangerous"
 
 
+class MapperScreenCompletionState(str, Enum):
+    PENDING = "pending"
+    CONTENT_COMPLETE = "content_complete"
+    RESUME_NEEDED = "resume_needed"
+    COMPLETE = "complete"
+
+
 class MapperFlowFailureType(str, Enum):
     """Interaction failures only (issue #21): the map's selector didn't match reality anymore.
     Not a log of every step outcome, success and safety-skips are never recorded here."""
