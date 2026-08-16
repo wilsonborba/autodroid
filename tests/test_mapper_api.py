@@ -159,6 +159,28 @@ def test_list_mapper_transitions_endpoint() -> None:
     assert response.json()[0]['result_type'] == 'clicked'
 
 
+def test_mapper_progress_endpoints() -> None:
+    ids = _seed_graph()
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        repository.update_session_metadata(ids["session_id"], {"current_activity": {"activity_kind": "exploring_screen", "current_screen_id": ids["screen_a_id"], "target_screen_id": ids["screen_b_id"], "strategy_type": "direct_path", "reason": "test"}, "last_meaningful_progress_at": "2026-08-16T12:00:00+00:00"})
+        repository.update_screen_metadata(ids["screen_a_id"], {"known_candidate_count": 1, "attempted_candidate_count": 1, "successful_candidate_count": 1})
+        session.commit()
+    client = TestClient(create_api_app())
+
+    session_progress = client.get(f"/mapper/sessions/{ids['session_id']}/progress")
+    assert session_progress.status_code == 200
+    assert session_progress.json()["current_activity"]["activity_kind"] == "exploring_screen"
+
+    screens_progress = client.get(f"/mapper/sessions/{ids['session_id']}/progress/screens")
+    assert screens_progress.status_code == 200
+    assert len(screens_progress.json()) == 2
+
+    screen_progress = client.get(f"/mapper/sessions/{ids['session_id']}/progress/screens/{ids['screen_a_id']}")
+    assert screen_progress.status_code == 200
+    assert screen_progress.json()["known_candidates"] == 1
+
+
 def test_mapper_graph_endpoint() -> None:
     ids = _seed_graph()
     client = TestClient(create_api_app())

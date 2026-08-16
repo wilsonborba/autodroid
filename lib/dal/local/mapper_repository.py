@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from lib.core.utils.clock import utc_now
 from lib.domain.models.mapper_model import MapperAction, MapperNode, MapperScreen, MapperSession, MapperTransition
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperScreenCompletionState, MapperSessionStatus
 
@@ -190,6 +191,28 @@ class SqlAlchemyMapperRepository:
             screen.expanded = True
         elif state == MapperScreenCompletionState.PENDING:
             screen.expanded = False
+        self.session.flush()
+        return screen
+
+    def update_session_metadata(self, session_id: int, updates: dict[str, Any]) -> MapperSession:
+        mapper_session = self.session.get(MapperSession, session_id)
+        if mapper_session is None:
+            raise ValueError(f"Mapper session {session_id} not found")
+        metadata = dict(mapper_session.metadata_json or {})
+        metadata.update(updates)
+        metadata["updated_at"] = utc_now().isoformat()
+        mapper_session.metadata_json = metadata
+        self.session.flush()
+        return mapper_session
+
+    def update_screen_metadata(self, screen_id: int, updates: dict[str, Any]) -> MapperScreen:
+        screen = self.session.get(MapperScreen, screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        metadata = dict(screen.metadata_json or {})
+        metadata.update(updates)
+        metadata["last_activity_at"] = utc_now().isoformat()
+        screen.metadata_json = metadata
         self.session.flush()
         return screen
 
