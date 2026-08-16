@@ -11,7 +11,7 @@ from lib.domain.services.mapper_fingerprint_service import MapperFingerprintServ
 from lib.domain.services.mapper_mode_service import MapperModeService
 from lib.domain.services.mapper_route_planner_service import DIRECT_PATH, RESTART, ExecutionPlan
 from lib.domain.services.mapper_safety_service import MapperSafetyService
-from lib.domain.services.ui_mapper_service import UiMapperService
+from lib.domain.services.ui_mapper_service import MapperFrontierItem, UiMapperService
 
 ROOT_NODES = [{"text": "Profile", "content_desc": "", "resource_id": "profile_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True}]
 LEAF_NODES = [{"text": "", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True}]
@@ -691,6 +691,58 @@ def test_failed_return_can_choose_restart_via_mapper_recovery_planner(monkeypatc
     assert service.ui.clicks == []
     assert service.adb.back_calls == 1
     assert service.navigation_context.prepared == [package_name]
+
+
+def test_frontier_scheduler_prefers_pending_screen_over_complete_corridors() -> None:
+    package_name = "com.frontier.testapp"
+    service = build_service([])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.MEDIUM, skip_dangerous_actions=True, max_depth=3, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root-fp", structural_signature="root-sig", screen_key="root", depth=0, ordinal=0)
+        complete_branch = repository.create_screen(session_id=mapper_session.id, fingerprint="complete-fp", structural_signature="complete-sig", screen_key="complete", depth=1, ordinal=1)
+        pending_branch = repository.create_screen(session_id=mapper_session.id, fingerprint="pending-fp", structural_signature="pending-sig", screen_key="pending", depth=1, ordinal=2)
+        repository.set_screen_completion_state(root.id, MapperScreenCompletionState.COMPLETE)
+        repository.set_screen_completion_state(complete_branch.id, MapperScreenCompletionState.COMPLETE)
+        repository.set_screen_completion_state(pending_branch.id, MapperScreenCompletionState.RESUME_NEEDED)
+        session.commit()
+
+        frontier = service._build_exploration_frontier(repository, mapper_session.id, current_screen_id=root.id, max_depth=3)
+
+    assert [item.screen_id for item in frontier] == [pending_branch.id]
+
+
+def test_frontier_scheduler_prefers_cheapest_pending_target(monkeypatch) -> None:
+    package_name = "com.frontiercost.testapp"
+    service = build_service([])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.MEDIUM, skip_dangerous_actions=True, max_depth=4, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root-fp", structural_signature="root-sig", screen_key="root", depth=0, ordinal=0)
+        cheap = repository.create_screen(session_id=mapper_session.id, fingerprint="cheap-fp", structural_signature="cheap-sig", screen_key="cheap", depth=2, ordinal=1)
+        expensive = repository.create_screen(session_id=mapper_session.id, fingerprint="expensive-fp", structural_signature="expensive-sig", screen_key="expensive", depth=1, ordinal=2)
+        repository.set_screen_completion_state(root.id, MapperScreenCompletionState.COMPLETE)
+        repository.set_screen_completion_state(cheap.id, MapperScreenCompletionState.RESUME_NEEDED)
+        repository.set_screen_completion_state(expensive.id, MapperScreenCompletionState.RESUME_NEEDED)
+        session.commit()
+
+        def fake_frontier_item(repository, session_id, *, current_screen_id, screen_id, completion_state):
+            estimated = 25.0 if screen_id == cheap.id else 80.0
+            return service.__class__.__dict__["_frontier_item_for_screen"].__annotations__ and MapperFrontierItem(
+                screen_id=screen_id,
+                depth=repository.get_screen(screen_id).depth,
+                completion_state=completion_state,
+                strategy_type="direct_path",
+                estimated_duration_ms=estimated,
+                reason="fake_cost",
+            )
+
+        monkeypatch.setattr(service, "_frontier_item_for_screen", fake_frontier_item)
+        frontier = service._build_exploration_frontier(repository, mapper_session.id, current_screen_id=root.id, max_depth=4)
+
+    assert [item.screen_id for item in frontier] == [cheap.id, expensive.id]
 
 
 def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:
