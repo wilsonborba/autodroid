@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import json
 import sys
 import time as time_module
@@ -196,6 +198,7 @@ DEFAULT_API_PORT = 8000
 def serve_api(
     host: str = "127.0.0.1",
     port: int | None = typer.Option(None, help="Port to bind. Given explicitly: used as-is, fails loudly if it's taken. Omitted: an available port is found automatically starting from 8000, and reported."),
+    allow_dangerous_actions: bool = typer.Option(False, "--allow-dangerous-actions", help="Disables the dangerous-action blocker for this API process only. Off by default; use only for explicit supervised runs."),
 ) -> None:
     """Starts the FastAPI/uvicorn server. A top-level command, not under `worker`: the API
     server and the worker/dispatcher (`worker run`) are two separate processes the user runs
@@ -205,6 +208,10 @@ def serve_api(
     later can read it instead of guessing or scanning ports blind (issue #44).
     """
     import uvicorn
+
+    if allow_dangerous_actions:
+        os.environ["AUTODROID_ALLOW_DANGEROUS_ACTIONS"] = "true"
+        get_settings.cache_clear()
 
     settings = get_settings()
     if port is not None:
@@ -222,6 +229,8 @@ def serve_api(
 
     write_api_state(settings.api_state_file, host=host, port=resolved_port)
     typer.echo(f"Starting autodroid API on http://{host}:{resolved_port} (state: {settings.api_state_file})")
+    if settings.allow_dangerous_actions:
+        typer.echo("Dangerous action blocker disabled for this API process (--allow-dangerous-actions)")
     try:
         uvicorn.run(create_api_app(), host=host, port=resolved_port)
     finally:

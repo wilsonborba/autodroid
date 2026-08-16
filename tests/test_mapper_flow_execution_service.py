@@ -165,7 +165,7 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
 
     service.logger = get_logger(__name__)
     settings = load_settings()
-    service.settings = type("Settings", (), {"output_dir": __import__("pathlib").Path("/tmp/autodroid-flow-tests"), "timezone": settings.timezone})()
+    service.settings = type("Settings", (), {"output_dir": __import__("pathlib").Path("/tmp/autodroid-flow-tests"), "timezone": settings.timezone, "allow_dangerous_actions": False})()
     service.ui = FakeUi(dump_sequence)
     service.adb = FakeAdb()
     service.navigation_context = FakeNav()
@@ -339,6 +339,18 @@ def test_click_step_dangerous_allowed_with_override() -> None:
 
     result = service.run_step(step, skip_dangerous_actions=False)
 
+    assert result["skipped_reason"] is None
+    assert service.ui.clicked_exact == [("Delete account",)]
+
+
+def test_click_step_dangerous_allowed_when_process_flag_is_enabled() -> None:
+    service = build_service()
+    service.settings.allow_dangerous_actions = True
+    step = make_step(action_type="click", selector_json={"candidates": ["Delete account"]})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
     assert result["skipped_reason"] is None
     assert service.ui.clicked_exact == [("Delete account",)]
 

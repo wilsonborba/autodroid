@@ -26,6 +26,7 @@ class Settings:
     mapper_churn_window_size: int
     mapper_churn_min_confidence: float
     mapper_churn_aggressiveness: float
+    allow_dangerous_actions: bool
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -53,4 +54,5 @@ def load_settings() -> Settings:
         mapper_churn_window_size=int(os.getenv("AUTODROID_MAPPER_CHURN_WINDOW_SIZE", "8")),
         mapper_churn_min_confidence=float(os.getenv("AUTODROID_MAPPER_CHURN_MIN_CONFIDENCE", "0.55")),
         mapper_churn_aggressiveness=float(os.getenv("AUTODROID_MAPPER_CHURN_AGGRESSIVENESS", "0.35")),
+        allow_dangerous_actions=os.getenv("AUTODROID_ALLOW_DANGEROUS_ACTIONS", "false").lower() == "true",
     )

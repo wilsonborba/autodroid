@@ -344,7 +344,7 @@ class MapperFlowExecutionService:
         label = self._describe_step(step)
         safety = self.safety_service.classify({"text": label, "content_desc": label, "resource_id": ""}, label)
 
-        if safety == MapperActionSafety.DANGEROUS and skip_dangerous_actions:
+        if safety == MapperActionSafety.DANGEROUS and skip_dangerous_actions and not self.settings.allow_dangerous_actions:
             self.logger.warning("Blocked dangerous flow step %s (%s: %r)", step.id, step.action_type, label)
             return {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": "dangerous_action_blocked"}
 
