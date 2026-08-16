@@ -59,6 +59,7 @@ class MapperActivityResponse(BaseModel):
     target_screen_id: int | None = None
     strategy_type: str | None = None
     reason: str | None = None
+    route_signature: str | None = None
 
 
 class MapperSessionProgressResponse(BaseModel):
@@ -74,8 +75,9 @@ class MapperSessionProgressResponse(BaseModel):
     action_counts: dict[str, int]
     transition_count: int
     revisited_screens: int
-    current_activity: dict[str, Any]
+    current_activity: MapperActivityResponse
     last_meaningful_progress_at: str | None = None
+    recovery_counts: dict[str, int] = {}
 
 
 class MapperScreenProgressResponse(BaseModel):
@@ -94,6 +96,74 @@ class MapperScreenProgressResponse(BaseModel):
     progress_percent: float
     last_activity_at: str | None = None
     observation_count: int = 1
+    scroll_attempts: int = 0
+    useful_scroll_discoveries: int = 0
+
+
+class MapperRuntimeSnapshotResponse(BaseModel):
+    id: int
+    session_id: int
+    package_name: str
+    observed_at: datetime
+    event_type: str
+    activity_kind: str | None = None
+    current_screen_id: int | None = None
+    target_screen_id: int | None = None
+    strategy_type: str | None = None
+    route_signature: str | None = None
+    duration_ms: float | None = None
+    restart_count: int
+    recovery_count: int
+    revisit_count: int
+    planner_restart_count: int
+    planner_direct_count: int
+    known_return_count: int
+    repeated_route_count: int
+    repeated_context_count: int
+    seconds_since_last_meaningful_progress: int
+    clicks_since_last_meaningful_progress: int
+    new_screens: int
+    new_actions: int
+    new_transitions: int
+    pending_screens_delta: int
+    completed_screens_delta: int
+    progress_delta: float
+    metadata: dict[str, Any] = {}
+
+
+class MapperChurnEvaluatorResponse(BaseModel):
+    name: str
+    score: float
+    confidence: float
+    triggered: bool
+    explanation: str
+    recommendation: str
+
+
+class MapperChurnRecommendationResponse(BaseModel):
+    action: str
+    confidence: float
+    target_screen_id: int | None = None
+    current_screen_id: int | None = None
+    strategy_type: str | None = None
+    rationale: str
+    automatic: bool = False
+
+
+class MapperChurnStatusResponse(BaseModel):
+    session_id: int
+    package_name: str
+    mode: str
+    severity: str
+    score: float
+    confidence: float
+    window_size: int
+    current_activity: MapperActivityResponse
+    metrics: dict[str, Any]
+    evaluators: list[MapperChurnEvaluatorResponse]
+    recommendations: list[MapperChurnRecommendationResponse]
+    applied_policy: dict[str, Any] | None = None
+    latest_snapshot: MapperRuntimeSnapshotResponse | None = None
 
 
 class MapperExportResponse(BaseModel):
@@ -267,3 +337,46 @@ class MapperRemapJobResponse(BaseModel):
 
 class MapperRemapResponse(BaseModel):
     queued: list[MapperRemapJobResponse]
+
+
+class MapperOnDemandStartResponse(BaseModel):
+    package_name: str
+    started: bool
+
+
+class MapperOnDemandCandidateResponse(BaseModel):
+    action_id: int
+    action_key: str
+    label: str | None
+    action_type: str
+    executed: bool
+    success: bool | None
+    bounds: str | None = None
+
+
+class MapperOnDemandInspectResponse(BaseModel):
+    session_id: int
+    package_name: str
+    screen_id: int
+    recognized: bool
+    screen_key: str | None = None
+    visible_texts: list[str]
+    candidates: list[MapperOnDemandCandidateResponse]
+    node_count: int
+
+
+class MapperOnDemandActionRequest(BaseModel):
+    package_name: str
+    session_id: int | None = None
+    action_id: int | None = None
+    bounds: str | None = None
+    action_type: str = "click"
+
+
+class MapperOnDemandActionResponse(BaseModel):
+    session_id: int
+    source_screen_id: int
+    resulting_screen_id: int | None
+    action_id: int
+    success: bool
+    result_type: str

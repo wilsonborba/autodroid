@@ -14,6 +14,7 @@ from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_model import MapperSession
 from lib.domain.models.mapper_types import MapperActionSafety, MapperLimits, MapperRunConfig, MapperScreenCompletionState, MapperSessionStatus
 from lib.domain.services.mapper_engine import MapperEngine
+from lib.domain.services.mapper_churn_service import MapperChurnService
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
 from lib.domain.services.mapper_route_planner_service import RESTART, MapperRoutePlannerService, RestartOption
@@ -39,6 +40,7 @@ class MapperFrontierItem:
     strategy_type: str
     estimated_duration_ms: float
     reason: str
+    route_signature: str | None = None
 
 
 class UiMapperService(MapperEngine):
@@ -152,6 +154,7 @@ class UiMapperService(MapperEngine):
         target_screen_id: int | None = None,
         strategy_type: str | None = None,
         reason: str | None = None,
+        route_signature: str | None = None,
     ) -> None:
         repository.update_session_metadata(session_id, {
             "current_activity": {
@@ -160,11 +163,50 @@ class UiMapperService(MapperEngine):
                 "target_screen_id": target_screen_id,
                 "strategy_type": strategy_type,
                 "reason": reason,
+                "route_signature": route_signature,
             }
         })
+        self._record_runtime_snapshot(
+            repository,
+            session_id,
+            event_type="activity",
+            activity_kind=activity_kind,
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            strategy_type=strategy_type,
+            route_signature=route_signature,
+            metadata_json={"reason": reason},
+        )
 
     def _mark_meaningful_progress(self, repository: SqlAlchemyMapperRepository, session_id: int) -> None:
         repository.update_session_metadata(session_id, {"last_meaningful_progress_at": utc_now().isoformat()})
+        self._record_runtime_snapshot(repository, session_id, event_type="meaningful_progress")
+
+    def _record_runtime_snapshot(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        *,
+        event_type: str,
+        activity_kind: str | None = None,
+        current_screen_id: int | None = None,
+        target_screen_id: int | None = None,
+        strategy_type: str | None = None,
+        route_signature: str | None = None,
+        duration_ms: float | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> None:
+        MapperChurnService(repository.session, self.settings).record_snapshot(
+            session_id,
+            event_type=event_type,
+            activity_kind=activity_kind,
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            strategy_type=strategy_type,
+            route_signature=route_signature,
+            duration_ms=duration_ms,
+            metadata_json=metadata_json,
+        )
 
     def _continue_session(
         self,
@@ -272,7 +314,16 @@ class UiMapperService(MapperEngine):
             if not frontier:
                 return
             target = frontier[0]
-            self._set_current_activity(repository, session_id, activity_kind="frontier_target_selected", current_screen_id=current_screen_id, target_screen_id=target.screen_id, strategy_type=target.strategy_type, reason=target.reason)
+            self._set_current_activity(
+                repository,
+                session_id,
+                activity_kind="frontier_target_selected",
+                current_screen_id=current_screen_id,
+                target_screen_id=target.screen_id,
+                strategy_type=target.strategy_type,
+                reason=target.reason,
+                route_signature=target.route_signature,
+            )
             self.logger.info(
                 "Mapper frontier selected screen %s (state=%s strategy=%s estimated_ms=%.0f reason=%s)",
                 target.screen_id,
@@ -318,6 +369,9 @@ class UiMapperService(MapperEngine):
         max_depth: int,
     ) -> list[MapperFrontierItem]:
         frontier: list[MapperFrontierItem] = []
+        mapper_session = repository.get_session(session_id)
+        frontier_policy = {} if mapper_session is None else ((mapper_session.metadata_json or {}).get("frontier_policy") or {})
+        penalties = dict(frontier_policy.get("deprioritized_screens") or {})
         for screen in repository.list_screens(session_id):
             completion_state = repository.get_screen_completion_state(screen.id)
             if screen.depth >= max_depth:
@@ -326,15 +380,25 @@ class UiMapperService(MapperEngine):
                 continue
             if completion_state == MapperScreenCompletionState.PENDING and not screen.expanded:
                 continue
-            frontier.append(
-                self._frontier_item_for_screen(
-                    repository,
-                    session_id,
-                    current_screen_id=current_screen_id,
-                    screen_id=screen.id,
-                    completion_state=completion_state,
-                )
+            item = self._frontier_item_for_screen(
+                repository,
+                session_id,
+                current_screen_id=current_screen_id,
+                screen_id=screen.id,
+                completion_state=completion_state,
             )
+            penalty_ms = float(penalties.get(str(screen.id), 0))
+            if penalty_ms > 0:
+                item = MapperFrontierItem(
+                    screen_id=item.screen_id,
+                    depth=item.depth,
+                    completion_state=item.completion_state,
+                    strategy_type=item.strategy_type,
+                    estimated_duration_ms=item.estimated_duration_ms + penalty_ms,
+                    reason=f"{item.reason}|hot_context_penalty",
+                    route_signature=item.route_signature,
+                )
+            frontier.append(item)
         frontier.sort(key=lambda item: (item.estimated_duration_ms, 0 if item.completion_state == MapperScreenCompletionState.RESUME_NEEDED else 1, item.depth, item.screen_id))
         return frontier
 
@@ -358,6 +422,7 @@ class UiMapperService(MapperEngine):
                 strategy_type="in_place",
                 estimated_duration_ms=0.0,
                 reason="already_at_target" if current_screen_id == screen_id else "frontier_resume",
+                route_signature=None,
             )
         restart_action_ids = [action_id for action_id in self._restart_action_ids(repository, screen.id) if action_id is not None]
         plan = MapperRoutePlannerService(repository.session).plan(
@@ -376,6 +441,7 @@ class UiMapperService(MapperEngine):
             strategy_type=plan.strategy_type,
             estimated_duration_ms=plan.estimated_duration_ms,
             reason=plan.reason,
+            route_signature=plan.route_signature,
         )
 
     def _navigate_to_screen(
@@ -409,7 +475,20 @@ class UiMapperService(MapperEngine):
             success = self._execute_action_ids(repository, restart_action_ids) and self._screen_matches(package_name, target_screen.fingerprint)
         else:
             success = self._execute_route(repository, plan.route) and self._screen_matches(package_name, target_screen.fingerprint)
-        planner.record_execution(plan, actual_duration_ms=(time.monotonic() - started) * 1000, success=success)
+        actual_duration_ms = (time.monotonic() - started) * 1000
+        planner.record_execution(plan, actual_duration_ms=actual_duration_ms, success=success)
+        self._record_runtime_snapshot(
+            repository,
+            session_id,
+            event_type="navigation",
+            activity_kind="frontier_navigation",
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            strategy_type=plan.strategy_type,
+            route_signature=plan.route_signature,
+            duration_ms=actual_duration_ms,
+            metadata_json={"success": success, "reason": plan.reason},
+        )
         return success
 
     @staticmethod
@@ -526,6 +605,16 @@ class UiMapperService(MapperEngine):
             state["revisited_screens"] += 1
             screen = existing_screen
             repository.session.commit()
+            self._record_runtime_snapshot(
+                repository,
+                session_id,
+                event_type="revisit",
+                activity_kind="exploring_screen",
+                current_screen_id=screen.id,
+                target_screen_id=screen.id,
+                strategy_type="in_place",
+                metadata_json={"revisit_kind": "known_screen"},
+            )
             if screen.id in visited_this_pass:
                 # cycle within this same traversal pass (e.g. an in-app back button): already
                 # being handled higher up this same call stack, stop here to avoid recursing forever
@@ -583,6 +672,16 @@ class UiMapperService(MapperEngine):
             repository.record_screen_observation(canonical_screen.id, fingerprint)
             state["revisited_screens"] += 1
             repository.session.commit()
+            self._record_runtime_snapshot(
+                repository,
+                session_id,
+                event_type="revisit",
+                activity_kind="exploring_screen",
+                current_screen_id=canonical_screen.id,
+                target_screen_id=canonical_screen.id,
+                strategy_type="in_place",
+                metadata_json={"revisit_kind": "canonical_reuse"},
+            )
             if canonical_screen.id in visited_this_pass:
                 return canonical_screen.id
             visited_this_pass.add(canonical_screen.id)
@@ -722,6 +821,8 @@ class UiMapperService(MapperEngine):
             self.ui.swipe_up()
             screen_scrolls_used += 1
             state["scrolls_used"] += 1
+            screen_metadata = repository.get_screen(screen.id).metadata_json or {}
+            repository.update_screen_metadata(screen.id, {"scroll_attempts": int(screen_metadata.get("scroll_attempts", 0)) + 1})
             current_nodes = self.ui.dump_nodes()
 
             if self._left_target_app(current_nodes, package_name):
@@ -753,11 +854,36 @@ class UiMapperService(MapperEngine):
                 )
                 node_id_by_key[key] = persisted.id
             if new_nodes_found:
+                refreshed_metadata = repository.get_screen(screen.id).metadata_json or {}
+                repository.update_screen_metadata(
+                    screen.id,
+                    {"useful_scroll_discoveries": int(refreshed_metadata.get("useful_scroll_discoveries", 0)) + 1},
+                )
                 repository.session.commit()
+                self._record_runtime_snapshot(
+                    repository,
+                    session_id,
+                    event_type="scroll",
+                    activity_kind="scrolling",
+                    current_screen_id=screen.id,
+                    target_screen_id=screen.id,
+                    strategy_type="in_place",
+                    metadata_json={"new_nodes_found": new_node_count, "useful": True},
+                )
                 self.logger.debug("Scroll %s on screen %s found %s new node(s), continuing", screen_scrolls_used, screen.id, new_node_count)
                 consecutive_empty_scrolls = 0
             else:
                 consecutive_empty_scrolls += 1
+                self._record_runtime_snapshot(
+                    repository,
+                    session_id,
+                    event_type="scroll",
+                    activity_kind="scrolling",
+                    current_screen_id=screen.id,
+                    target_screen_id=screen.id,
+                    strategy_type="in_place",
+                    metadata_json={"new_nodes_found": 0, "useful": False},
+                )
                 self.logger.debug("Scroll %s on screen %s found nothing new (%s/%s consecutive)", screen_scrolls_used, screen.id, consecutive_empty_scrolls, max_consecutive_empty_scrolls)
 
         if depth < max_depth:
@@ -899,6 +1025,21 @@ class UiMapperService(MapperEngine):
                     to_screen_id=None,
                     result_type="failed_click",
                 )
+            self._record_runtime_snapshot(
+                repository,
+                session_id,
+                event_type="action",
+                activity_kind="exploring_screen",
+                current_screen_id=screen.id,
+                target_screen_id=to_screen_id if success else screen.id,
+                strategy_type=action.action_type,
+                route_signature=action.action_key,
+                metadata_json={
+                    "success": success,
+                    "candidate_label": candidate.label,
+                    "navigation_kind": None if not success else (action.metadata_json or {}).get("navigation_kind"),
+                },
+            )
             # commit per action (issue #25): whatever already ran is durable before moving on,
             # a crash mid-mapping only ever loses the one action currently in flight
             repository.session.commit()
@@ -1088,6 +1229,17 @@ class UiMapperService(MapperEngine):
             self.logger.warning("Relaunching %s and replaying %s step(s) back to the current screen after leaving the app", package_name, len(ancestor_bounds))
             self.navigation_context.prepare_fresh_app_launch(package_name)
             self._replay_bounds(ancestor_bounds)
+            self._record_runtime_snapshot(
+                repository,
+                session_id,
+                event_type="recovery",
+                activity_kind="recovering",
+                current_screen_id=current_screen_id,
+                target_screen_id=expected_screen_id,
+                strategy_type=RESTART,
+                route_signature=f"departure_restart:{expected_screen_id or 'unknown'}",
+                metadata_json={"success": True, "recovery_kind": "departure_restart"},
+            )
 
         if expected_fingerprint is None:
             return
@@ -1103,6 +1255,18 @@ class UiMapperService(MapperEngine):
                     strategy=return_strategy,
                     return_node=return_node,
                 )
+                if return_strategy == "known_return":
+                    self._record_runtime_snapshot(
+                        repository,
+                        session_id,
+                        event_type="recovery",
+                        activity_kind="recovering",
+                        current_screen_id=current_screen_id,
+                        target_screen_id=expected_screen_id,
+                        strategy_type="known_return",
+                        route_signature=f"known_return:{current_screen_id}:{expected_screen_id}",
+                        metadata_json={"success": True, "recovery_kind": "known_return"},
+                    )
             if current_screen_id is not None:
                 current_state = repository.get_screen_completion_state(current_screen_id)
                 if current_state != MapperScreenCompletionState.RESUME_NEEDED:
@@ -1123,6 +1287,17 @@ class UiMapperService(MapperEngine):
             return
         self.navigation_context.prepare_fresh_app_launch(package_name)
         self._replay_bounds(ancestor_bounds)
+        self._record_runtime_snapshot(
+            repository,
+            session_id,
+            event_type="recovery",
+            activity_kind="recovering",
+            current_screen_id=current_screen_id,
+            target_screen_id=expected_screen_id,
+            strategy_type=RESTART,
+            route_signature=f"restart:{expected_screen_id or 'unknown'}",
+            metadata_json={"success": True, "recovery_kind": "restart"},
+        )
 
     def _recover_via_planner(
         self,
@@ -1157,7 +1332,24 @@ class UiMapperService(MapperEngine):
             success = True
         else:
             success = self._execute_route(repository, plan.route) and self._screen_matches(package_name, target_screen.fingerprint)
-        planner.record_execution(plan, actual_duration_ms=(time.monotonic() - started) * 1000, success=success)
+        actual_duration_ms = (time.monotonic() - started) * 1000
+        planner.record_execution(plan, actual_duration_ms=actual_duration_ms, success=success)
+        self._record_runtime_snapshot(
+            repository,
+            session_id,
+            event_type="recovery",
+            activity_kind="recovering",
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            strategy_type=plan.strategy_type,
+            route_signature=plan.route_signature,
+            duration_ms=actual_duration_ms,
+            metadata_json={
+                "success": success,
+                "recovery_kind": "planner_restart" if plan.strategy_type == RESTART else "planner_direct",
+                "reason": plan.reason,
+            },
+        )
         return success
 
     def _execute_route(self, repository: SqlAlchemyMapperRepository, route: list[Any]) -> bool:

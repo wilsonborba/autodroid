@@ -22,6 +22,10 @@ class Settings:
     ocr_language: str
     mapper_auto_remap_enabled: bool
     mapper_auto_remap_threshold: int
+    mapper_churn_mode: str
+    mapper_churn_window_size: int
+    mapper_churn_min_confidence: float
+    mapper_churn_aggressiveness: float
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -45,4 +49,8 @@ def load_settings() -> Settings:
         ocr_language=os.getenv("AUTODROID_OCR_LANGUAGE", "en"),
         mapper_auto_remap_enabled=os.getenv("AUTODROID_MAPPER_AUTO_REMAP_ENABLED", "false").lower() == "true",
         mapper_auto_remap_threshold=int(os.getenv("AUTODROID_MAPPER_AUTO_REMAP_THRESHOLD", "3")),
+        mapper_churn_mode=os.getenv("AUTODROID_MAPPER_CHURN_MODE", "recommend"),
+        mapper_churn_window_size=int(os.getenv("AUTODROID_MAPPER_CHURN_WINDOW_SIZE", "8")),
+        mapper_churn_min_confidence=float(os.getenv("AUTODROID_MAPPER_CHURN_MIN_CONFIDENCE", "0.55")),
+        mapper_churn_aggressiveness=float(os.getenv("AUTODROID_MAPPER_CHURN_AGGRESSIVENESS", "0.35")),
     )

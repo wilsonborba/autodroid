@@ -6,13 +6,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from lib.core.utils.clock import utc_now
-from lib.domain.models.mapper_model import MapperAction, MapperNode, MapperScreen, MapperSession, MapperTransition
+from lib.domain.models.mapper_model import MapperAction, MapperNode, MapperRuntimeSnapshot, MapperScreen, MapperSession, MapperTransition
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperScreenCompletionState, MapperSessionStatus
 
 
 class SqlAlchemyMapperRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def _ensure_runtime_snapshot_table(self) -> None:
+        bind = self.session.get_bind()
+        if bind is not None:
+            MapperRuntimeSnapshot.__table__.create(bind, checkfirst=True)
 
     def create_session(
         self,
@@ -82,6 +87,69 @@ class SqlAlchemyMapperRepository:
         self.session.add(transition)
         self.session.flush()
         return transition
+
+    def create_runtime_snapshot(
+        self,
+        *,
+        session_id: int,
+        package_name: str,
+        event_type: str,
+        activity_kind: str | None = None,
+        current_screen_id: int | None = None,
+        target_screen_id: int | None = None,
+        strategy_type: str | None = None,
+        route_signature: str | None = None,
+        duration_ms: float | None = None,
+        restart_count: int = 0,
+        recovery_count: int = 0,
+        revisit_count: int = 0,
+        planner_restart_count: int = 0,
+        planner_direct_count: int = 0,
+        known_return_count: int = 0,
+        repeated_route_count: int = 0,
+        repeated_context_count: int = 0,
+        seconds_since_last_meaningful_progress: int = 0,
+        clicks_since_last_meaningful_progress: int = 0,
+        new_screens: int = 0,
+        new_actions: int = 0,
+        new_transitions: int = 0,
+        pending_screens_delta: int = 0,
+        completed_screens_delta: int = 0,
+        progress_delta: float = 0.0,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> MapperRuntimeSnapshot:
+        self._ensure_runtime_snapshot_table()
+        snapshot = MapperRuntimeSnapshot(
+            session_id=session_id,
+            package_name=package_name,
+            event_type=event_type,
+            activity_kind=activity_kind,
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            strategy_type=strategy_type,
+            route_signature=route_signature,
+            duration_ms=duration_ms,
+            restart_count=restart_count,
+            recovery_count=recovery_count,
+            revisit_count=revisit_count,
+            planner_restart_count=planner_restart_count,
+            planner_direct_count=planner_direct_count,
+            known_return_count=known_return_count,
+            repeated_route_count=repeated_route_count,
+            repeated_context_count=repeated_context_count,
+            seconds_since_last_meaningful_progress=seconds_since_last_meaningful_progress,
+            clicks_since_last_meaningful_progress=clicks_since_last_meaningful_progress,
+            new_screens=new_screens,
+            new_actions=new_actions,
+            new_transitions=new_transitions,
+            pending_screens_delta=pending_screens_delta,
+            completed_screens_delta=completed_screens_delta,
+            progress_delta=progress_delta,
+            metadata_json=metadata_json,
+        )
+        self.session.add(snapshot)
+        self.session.flush()
+        return snapshot
 
     def get_session(self, session_id: int) -> MapperSession | None:
         stmt = select(MapperSession).options(selectinload(MapperSession.screens).selectinload(MapperScreen.nodes), selectinload(MapperSession.actions), selectinload(MapperSession.transitions)).where(MapperSession.id == session_id)
@@ -215,6 +283,46 @@ class SqlAlchemyMapperRepository:
         screen.metadata_json = metadata
         self.session.flush()
         return screen
+
+    def get_latest_runtime_snapshot(self, session_id: int) -> MapperRuntimeSnapshot | None:
+        self._ensure_runtime_snapshot_table()
+        stmt = (
+            select(MapperRuntimeSnapshot)
+            .where(MapperRuntimeSnapshot.session_id == session_id)
+            .order_by(MapperRuntimeSnapshot.observed_at.desc(), MapperRuntimeSnapshot.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(stmt)
+
+    def list_runtime_snapshots(self, session_id: int, *, limit: int = 50) -> list[MapperRuntimeSnapshot]:
+        self._ensure_runtime_snapshot_table()
+        stmt = (
+            select(MapperRuntimeSnapshot)
+            .where(MapperRuntimeSnapshot.session_id == session_id)
+            .order_by(MapperRuntimeSnapshot.observed_at.desc(), MapperRuntimeSnapshot.id.desc())
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt))
+
+    def list_runtime_snapshots_for_package(
+        self,
+        package_name: str,
+        *,
+        exclude_session_id: int | None = None,
+        activity_kind: str | None = None,
+        strategy_type: str | None = None,
+        limit: int = 200,
+    ) -> list[MapperRuntimeSnapshot]:
+        self._ensure_runtime_snapshot_table()
+        stmt = select(MapperRuntimeSnapshot).where(MapperRuntimeSnapshot.package_name == package_name)
+        if exclude_session_id is not None:
+            stmt = stmt.where(MapperRuntimeSnapshot.session_id != exclude_session_id)
+        if activity_kind is not None:
+            stmt = stmt.where(MapperRuntimeSnapshot.activity_kind == activity_kind)
+        if strategy_type is not None:
+            stmt = stmt.where(MapperRuntimeSnapshot.strategy_type == strategy_type)
+        stmt = stmt.order_by(MapperRuntimeSnapshot.observed_at.desc(), MapperRuntimeSnapshot.id.desc()).limit(limit)
+        return list(self.session.scalars(stmt))
 
     def find_action_by_key(self, session_id: int, screen_id: int, action_key: str) -> MapperAction | None:
         stmt = select(MapperAction).where(

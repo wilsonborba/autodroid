@@ -27,6 +27,8 @@ def _fake_settings(state_file) -> Settings:
         api_state_file=state_file, app_timezone="UTC", android_serial="127.0.0.1:5555",
         linkedin_package_name="com.linkedin.android", ocr_language="en",
         mapper_auto_remap_enabled=False, mapper_auto_remap_threshold=3,
+        mapper_churn_mode="recommend", mapper_churn_window_size=8,
+        mapper_churn_min_confidence=0.55, mapper_churn_aggressiveness=0.35,
     )
 
 

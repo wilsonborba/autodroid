@@ -30,6 +30,19 @@ class MapperScreenCompletionState(str, Enum):
     COMPLETE = "complete"
 
 
+class MapperChurnMode(str, Enum):
+    OBSERVE = "observe"
+    RECOMMEND = "recommend"
+    ACT = "act"
+
+
+class MapperChurnSeverity(str, Enum):
+    HEALTHY = "healthy"
+    WATCH = "watch"
+    ELEVATED = "elevated"
+    CRITICAL = "critical"
+
+
 class MapperFlowFailureType(str, Enum):
     """Interaction failures only (issue #21): the map's selector didn't match reality anymore.
     Not a log of every step outcome, success and safety-skips are never recorded here."""

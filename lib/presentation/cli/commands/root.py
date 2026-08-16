@@ -16,8 +16,10 @@ from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
 from lib.domain.services.job_queue_service import JobQueueService
+from lib.domain.services.mapper_churn_service import MapperChurnService
 from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
 from lib.domain.services.mapper_flow_service import MapperFlowService
+from lib.domain.services.mapper_on_demand_service import MapperOnDemandService
 from lib.domain.services.mapper_progress_service import MapperProgressService
 from lib.domain.services.ui_mapper_service import UiMapperService
 from lib.domain.services.worker_service import WorkerService
@@ -247,6 +249,36 @@ def run_mapper(
     typer.echo(JsonOutput.render(result))
 
 
+@mapper_app.command("apps")
+def list_mapper_apps(as_json: bool = False) -> None:
+    payload = {"packages": MapperOnDemandService(get_settings()).list_packages()}
+    if as_json:
+        typer.echo(JsonOutput.render(payload))
+        return
+    for package_name in payload["packages"]:
+        typer.echo(package_name)
+
+
+@mapper_app.command("inspect")
+def inspect_mapper_screen(package_name: str, session_id: int | None = None, as_json: bool = False) -> None:
+    payload = MapperOnDemandService(get_settings()).inspect(package_name, session_id=session_id)
+    if as_json:
+        typer.echo(JsonOutput.render(payload))
+        return
+    typer.echo(f"session #{payload['session_id']} screen #{payload['screen_id']} {payload['screen_key']}")
+    for candidate in payload['candidates'][:20]:
+        typer.echo(f"  action #{candidate['action_id']} {candidate['label']!r} bounds={candidate['bounds']}")
+
+
+@mapper_app.command("act")
+def act_mapper_on_demand(package_name: str, session_id: int | None = None, action_id: int | None = None, bounds: str | None = None, action_type: str = "click", as_json: bool = False) -> None:
+    payload = MapperOnDemandService(get_settings()).act(package_name, session_id=session_id, action_id=action_id, bounds=bounds, action_type=action_type)
+    if as_json:
+        typer.echo(JsonOutput.render(payload))
+        return
+    typer.echo(str(payload))
+
+
 @mapper_app.command("sessions")
 def list_mapper_sessions(limit: int = 50, as_json: bool = False) -> None:
     with get_session() as session:
@@ -282,11 +314,13 @@ def show_mapper_session(session_id: int, as_json: bool = False) -> None:
 
 
 @mapper_app.command("progress")
-def show_mapper_progress(session_id: int, as_json: bool = False) -> None:
+def show_mapper_progress(session_id: int | None = None, package_name: str | None = typer.Option(None, "--package"), as_json: bool = False) -> None:
     with get_session() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        resolved_session_id = _resolve_mapper_session_id(repository, session_id, package_name)
         progress = MapperProgressService(session)
-        payload = progress.get_session_progress(session_id)
-        screens = progress.list_screen_progress(session_id)
+        payload = progress.get_session_progress(resolved_session_id)
+        screens = progress.list_screen_progress(resolved_session_id)
         payload["screens"] = screens[:10]
         if as_json:
             typer.echo(JsonOutput.render(payload))
@@ -296,9 +330,30 @@ def show_mapper_progress(session_id: int, as_json: bool = False) -> None:
         if activity:
             typer.echo(f"  activity={activity.get('activity_kind')} current={activity.get('current_screen_id')} target={activity.get('target_screen_id')} strategy={activity.get('strategy_type')}")
         typer.echo(f"  screens total={payload['screen_counts']['total']} pending={payload['screen_counts']['pending']} resume_needed={payload['screen_counts']['resume_needed']} complete={payload['screen_counts']['complete']}")
+        recovery = payload.get('recovery_counts') or {}
+        typer.echo(f"  recoveries total={recovery.get('total', 0)} restart={recovery.get('restart', 0)} planner_restart={recovery.get('planner_restart', 0)} planner_direct={recovery.get('planner_direct', 0)} known_return={recovery.get('known_return', 0)}")
         for item in screens[:10]:
             marker = '*' if item['is_current_target'] else '-'
-            typer.echo(f"  {marker} screen #{item['screen_id']} {item['screen_key']} depth={item['depth']} state={item['completion_state']} progress={item['progress_percent']}% pending={item['pending_candidates']}")
+            typer.echo(f"  {marker} screen #{item['screen_id']} {item['screen_key']} depth={item['depth']} state={item['completion_state']} progress={item['progress_percent']}% pending={item['pending_candidates']} scrolls={item['scroll_attempts']}/{item['useful_scroll_discoveries']}")
+
+
+@mapper_app.command("churn")
+def show_mapper_churn(session_id: int | None = None, package_name: str | None = typer.Option(None, "--package"), as_json: bool = False) -> None:
+    with get_session() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        resolved_session_id = _resolve_mapper_session_id(repository, session_id, package_name)
+        payload = MapperChurnService(session, get_settings()).get_live_churn(resolved_session_id)
+        if as_json:
+            typer.echo(JsonOutput.render(payload))
+            return
+        typer.echo(f"session #{payload['session_id']} churn={payload['severity']} score={payload['score']} confidence={payload['confidence']}")
+        activity = payload.get('current_activity') or {}
+        if activity:
+            typer.echo(f"  activity={activity.get('activity_kind')} current={activity.get('current_screen_id')} target={activity.get('target_screen_id')} strategy={activity.get('strategy_type')}")
+        metrics = payload.get('metrics') or {}
+        typer.echo(f"  restarts={metrics.get('window_restarts', 0)} recoveries={metrics.get('window_recoveries', 0)} revisits={metrics.get('window_revisits', 0)} value_gain={metrics.get('window_value_gain', 0)} clicks_since_progress={metrics.get('current_clicks_since_progress', 0)}")
+        for recommendation in payload.get('recommendations', [])[:3]:
+            typer.echo(f"  -> {recommendation['action']} target={recommendation.get('target_screen_id')} confidence={recommendation['confidence']} reason={recommendation['rationale']}")
 
 
 @mapper_app.command("export")
@@ -318,6 +373,17 @@ def _screen_summary_payload(screen) -> dict:
         "visit_count": screen.visit_count,
         "node_count": len(screen.nodes),
     }
+
+
+def _resolve_mapper_session_id(repository: SqlAlchemyMapperRepository, session_id: int | None, package_name: str | None) -> int:
+    if session_id is not None:
+        return session_id
+    if not package_name:
+        raise typer.BadParameter("provide a session_id or use --package")
+    mapper_session = repository.get_resumable_session(package_name) or repository.get_latest_session(package_name)
+    if mapper_session is None:
+        raise typer.BadParameter(f"No mapper session found for package {package_name}")
+    return mapper_session.id
 
 
 @mapper_app.command("screens")

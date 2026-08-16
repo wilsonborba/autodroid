@@ -24,7 +24,8 @@ class MapperProgressService:
         state_counts = Counter(item["completion_state"] for item in screen_progress)
         percent = round(sum(item["progress_percent"] for item in screen_progress) / len(screen_progress), 1) if screen_progress else 0.0
         metadata = mapper_session.metadata_json or {}
-        current_activity = metadata.get("current_activity") or {}
+        current_activity = self.get_current_activity(session_id)
+        latest_runtime = self.repository.get_latest_runtime_snapshot(session_id)
         return {
             "session_id": mapper_session.id,
             "package_name": mapper_session.package_name,
@@ -51,7 +52,20 @@ class MapperProgressService:
             "revisited_screens": sum(1 for screen in screens if screen.visit_count > 1),
             "current_activity": current_activity,
             "last_meaningful_progress_at": metadata.get("last_meaningful_progress_at"),
+            "recovery_counts": {
+                "total": 0 if latest_runtime is None else latest_runtime.recovery_count,
+                "restart": 0 if latest_runtime is None else latest_runtime.restart_count,
+                "planner_restart": 0 if latest_runtime is None else latest_runtime.planner_restart_count,
+                "planner_direct": 0 if latest_runtime is None else latest_runtime.planner_direct_count,
+                "known_return": 0 if latest_runtime is None else latest_runtime.known_return_count,
+            },
         }
+
+    def get_current_activity(self, session_id: int) -> dict[str, Any]:
+        mapper_session = self.repository.get_session(session_id)
+        if mapper_session is None:
+            raise LookupError("Mapper session not found")
+        return (mapper_session.metadata_json or {}).get("current_activity") or {}
 
     def list_screen_progress(self, session_id: int) -> list[dict[str, Any]]:
         mapper_session = self.repository.get_session(session_id)
@@ -96,6 +110,8 @@ class MapperProgressService:
                 "progress_percent": progress,
                 "last_activity_at": metadata.get("last_activity_at"),
                 "observation_count": metadata.get("observation_count", 1),
+                "scroll_attempts": metadata.get("scroll_attempts", 0),
+                "useful_scroll_discoveries": metadata.get("useful_scroll_discoveries", 0),
             })
         result.sort(key=lambda item: (item["is_current_target"] is False, item["progress_percent"], item["depth"], item["screen_id"]))
         return result
