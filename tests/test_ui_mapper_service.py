@@ -37,13 +37,32 @@ ROOT_TWO_PROFILES = [
     {"resource_id": "open_profile_b", "text": "Profile B", "content_desc": "", "class_name": "TextView", "bounds": "[0,10][100,20]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"},
 ]
 
+EDITOR_ROOT = [
+    {"resource_id": "open_editor", "text": "Open editor", "content_desc": "", "class_name": "TextView", "bounds": "[0,0][100,10]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
+EDITOR_BASE = [
+    {"resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Not selected", "class_name": "TextView", "bounds": "[0,20][100,30]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+    {"resource_id": "editor_tab_contrast", "text": "Contrast", "content_desc": "Contrast, Not selected", "class_name": "TextView", "bounds": "[0,40][100,50]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
+EDITOR_BRIGHTNESS = [
+    {"resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Selected", "class_name": "TextView", "bounds": "[0,20][100,30]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+    {"resource_id": "editor_tab_contrast", "text": "Contrast", "content_desc": "Contrast, Not selected", "class_name": "TextView", "bounds": "[0,40][100,50]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
+EDITOR_CONTRAST = [
+    {"resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Not selected", "class_name": "TextView", "bounds": "[0,20][100,30]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+    {"resource_id": "editor_tab_contrast", "text": "Contrast", "content_desc": "Contrast, Selected", "class_name": "TextView", "bounds": "[0,40][100,50]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
 _TEST_PACKAGE_NAMES = (
     "com.fresh.testapp", "com.dangerous.testapp", "com.reuse.testapp", "com.override.testapp",
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
     "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
     "com.candidatelog.testapp", "com.replaylog.testapp", "com.remapscreen.testapp",
-    "com.returnverify.testapp",
+    "com.returnverify.testapp", "com.localstate.testapp",
 )
 
 
@@ -145,6 +164,36 @@ def test_candidate_and_click_outcome_are_logged_at_debug_level(caplog) -> None:
     messages = [record.message for record in caplog.records]
     assert any("Candidate found: 'Profile'" in message for message in messages)
     assert any(message.startswith("Clicked 'Profile'") and "success=True" in message for message in messages)
+
+
+def test_local_state_controls_do_not_force_unwind_between_sibling_candidates() -> None:
+    service = build_service([
+        EDITOR_ROOT,
+        EDITOR_BASE,
+        EDITOR_BRIGHTNESS,
+        EDITOR_CONTRAST,
+        EDITOR_CONTRAST,
+        EDITOR_ROOT,
+    ])
+
+    result = service.run(MapperRunConfig(package_name="com.localstate.testapp", mode=MapperMode.MEDIUM))
+
+    assert result["actions_executed"] == 3  # open editor + brightness + contrast
+    assert service.ui.clicks == ["[0,0][100,10]", "[0,20][100,30]", "[0,40][100,50]"]
+    assert service.adb.back_calls == 1  # only leave the editor once, after exhausting its local state
+
+
+def test_local_state_control_heuristic_is_not_triggered_for_regular_navigation_links() -> None:
+    service = build_service([])
+
+    assert service._looks_like_local_state_control({
+        "resource_id": "connections_link", "text": "Connections", "content_desc": "", "class_name": "TextView",
+        "checkable": False, "checked": False,
+    }) is False
+    assert service._looks_like_local_state_control({
+        "resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Selected", "class_name": "TextView",
+        "checkable": False, "checked": False,
+    }) is True
 
 
 def test_dangerous_action_is_blocked_by_default() -> None:

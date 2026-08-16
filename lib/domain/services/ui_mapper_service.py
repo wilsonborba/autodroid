@@ -57,6 +57,11 @@ class UiMapperService(MapperEngine):
     # per-app timezone-independent wait, deliberately generous: replay only runs on recovery
     # paths (already the slow, exceptional case), never on the normal forward exploration loop.
     REPLAY_CLICK_SETTLE_SECONDS = 1.5
+    LOCAL_STATE_RESOURCE_ID_HINTS = (
+        "tab", "toggle", "switch", "slider", "seek", "filter", "chip", "segmented", "adjust",
+    )
+    LOCAL_STATE_CLASS_HINTS = ("tab", "switch", "toggle", "checkbox", "radiobutton", "seekbar")
+    LOCAL_STATE_LABEL_HINTS = ("selected", "not selected")
 
     def __init__(self, settings: Settings) -> None:
         self.logger = get_logger(__name__)
@@ -328,7 +333,13 @@ class UiMapperService(MapperEngine):
                         continue
                     if self.ui.click_bounds(node.bounds):
                         replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [node.bounds])
-                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                        if self._should_unwind_after_action(repository, from_screen_id=screen.id, to_screen_id=replay_to_screen_id, action=action):
+                            self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                        else:
+                            self.logger.debug(
+                                "Staying inside navigation context after replaying %r on screen %s",
+                                action.label, screen.id,
+                            )
                 return screen.id
 
             # resumed mid-screen (crash, a session continued in a deeper mode, or a forced
@@ -544,7 +555,13 @@ class UiMapperService(MapperEngine):
                     self.logger.debug("Replaying known action %r on screen %s", candidate.label, screen.id)
                     if self.ui.click_bounds(existing_node.bounds):
                         replay_to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [existing_node.bounds])
-                        self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                        if self._should_unwind_after_action(repository, from_screen_id=screen.id, to_screen_id=replay_to_screen_id, action=existing_action, node=existing_node):
+                            self._return_to_screen(package_name, ancestor_bounds, departed=replay_to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                        else:
+                            self.logger.debug(
+                                "Staying inside navigation context after replaying known action %r on screen %s",
+                                candidate.label, screen.id,
+                            )
                 continue
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
@@ -589,14 +606,23 @@ class UiMapperService(MapperEngine):
                 if peek:
                     self.logger.debug("Candidate %r is a peek target: cataloguing whatever it reveals without exploring further", candidate.label)
                 to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds], peek_only=peek)
+                navigation_kind = self._transition_navigation_kind(repository, from_screen_id=screen.id, to_screen_id=to_screen_id, node=candidate.node)
+                action.metadata_json = {**(action.metadata_json or {}), "navigation_kind": navigation_kind}
                 repository.create_transition(
                     session_id=session_id,
                     from_screen_id=screen.id,
                     action_id=action.id,
                     to_screen_id=to_screen_id,
                     result_type="clicked" if to_screen_id is not None else "left_app",
+                    metadata_json={"navigation_kind": navigation_kind},
                 )
-                self._return_to_screen(package_name, ancestor_bounds, departed=to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                if self._should_unwind_after_action(repository, from_screen_id=screen.id, to_screen_id=to_screen_id, action=action, node=candidate.node):
+                    self._return_to_screen(package_name, ancestor_bounds, departed=to_screen_id is None, expected_fingerprint=screen.fingerprint)
+                else:
+                    self.logger.debug(
+                        "Staying inside navigation context after %r on screen %s (kind=%s)",
+                        candidate.label, screen.id, navigation_kind,
+                    )
             else:
                 repository.create_transition(
                     session_id=session_id,
@@ -623,6 +649,62 @@ class UiMapperService(MapperEngine):
             )
             return True
         return False
+
+    def _transition_navigation_kind(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        *,
+        from_screen_id: int,
+        to_screen_id: int | None,
+        node: dict[str, Any] | None,
+    ) -> str:
+        if to_screen_id is None:
+            return "departure"
+        source = repository.get_screen(from_screen_id)
+        destination = repository.get_screen(to_screen_id)
+        if source is None or destination is None:
+            return "forward_navigation"
+        if source.structural_signature != destination.structural_signature:
+            return "forward_navigation"
+        if self._looks_like_local_state_control(node):
+            return "local_state_change"
+        return "forward_navigation"
+
+    def _should_unwind_after_action(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        *,
+        from_screen_id: int,
+        to_screen_id: int | None,
+        action: Any,
+        node: Any | None = None,
+    ) -> bool:
+        if to_screen_id is None:
+            return True
+        metadata = action.metadata_json or {}
+        if metadata.get("navigation_kind") == "local_state_change":
+            return False
+        resolved_node = node
+        if resolved_node is None and action.node_id is not None:
+            resolved_node = repository.get_node(action.node_id)
+        return self._transition_navigation_kind(repository, from_screen_id=from_screen_id, to_screen_id=to_screen_id, node=resolved_node) != "local_state_change"
+
+    def _looks_like_local_state_control(self, node: Any | None) -> bool:
+        if not node:
+            return False
+        getter = node.get if isinstance(node, dict) else lambda key, default=None: getattr(node, key, default)
+        resource_id = str(getter("resource_id") or "").lower()
+        class_name = str(getter("class_name") or "").lower()
+        label = str(getter("content_desc") or getter("text") or "").lower()
+        if any(hint in resource_id for hint in self.LOCAL_STATE_RESOURCE_ID_HINTS):
+            return True
+        if any(hint in class_name for hint in self.LOCAL_STATE_CLASS_HINTS):
+            return True
+        if any(hint in label for hint in self.LOCAL_STATE_LABEL_HINTS):
+            return True
+        checkable = bool(getter("checkable", False))
+        checked = bool(getter("checked", False))
+        return checkable or checked
 
     def _replay_target(self, repository: SqlAlchemyMapperRepository, action: Any) -> Any | None:
         """An already-recorded action is only worth replaying if it's known to lead somewhere
