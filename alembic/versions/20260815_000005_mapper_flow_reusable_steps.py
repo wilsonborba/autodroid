@@ -45,6 +45,12 @@ def upgrade() -> None:
         ") WHERE EXISTS (SELECT 1 FROM mapper_flows WHERE mapper_flows.id = mapper_flow_steps.flow_id)"
     )
 
+    # the old index is fully superseded by ix_mapper_flow_step_usages_flow_id_ordinal above, and
+    # must go before the columns it's built on do: SQLite's batch mode rebuilds the table from
+    # scratch and tries to recreate every index it saw on the old one, which fails once flow_id
+    # and ordinal are gone (issue #42, hit the first time this migration ran against an empty DB).
+    op.drop_index("ix_mapper_flow_steps_flow_id_ordinal", table_name="mapper_flow_steps")
+
     with op.batch_alter_table("mapper_flow_steps") as batch_op:
         batch_op.drop_column("flow_id")
         batch_op.drop_column("ordinal")
@@ -66,6 +72,10 @@ def downgrade() -> None:
         batch_op.alter_column("ordinal", nullable=False)
         batch_op.drop_column("created_at")
         batch_op.drop_column("package_name")
+
+    # mirrors the drop in upgrade(): restores the index 000003's own downgrade() expects to
+    # find (and drops by name) on mapper_flow_steps.
+    op.create_index("ix_mapper_flow_steps_flow_id_ordinal", "mapper_flow_steps", ["flow_id", "ordinal"])
 
     op.drop_index("ix_mapper_flow_step_usages_flow_id_ordinal", table_name="mapper_flow_step_usages")
     op.drop_table("mapper_flow_step_usages")
