@@ -48,3 +48,41 @@ def test_structural_signature_distinguishes_genuinely_different_layouts() -> Non
     settings_row = [{"resource_id": "settings_row", "text": "y", "content_desc": "", "class_name": "TextView", "clickable": True, "scrollable": False}]
 
     assert service.structural_signature(feed_card) != service.structural_signature(settings_row)
+
+
+def test_fingerprint_ignores_a_foreign_package_clock_that_changes_every_minute() -> None:
+    # issue #47: a dump always includes whatever else is visible too (status bar clock, battery,
+    # launcher nav icons), none of it belongs to the app being mapped, and the clock in
+    # particular changes every minute. Left in, the exact same real screen gets a different
+    # fingerprint depending on what time it happened to be dumped, so it's never recognized as
+    # already-known and gets fully re-explored again and again.
+    service = MapperFingerprintService()
+    screen_at_1502 = [
+        {"resource_id": "profile_header", "text": "Wilson Borba", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.target.testapp"},
+        {"resource_id": "clock", "text": "3:02 PM", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.android.systemui"},
+    ]
+    screen_at_1504 = [
+        {"resource_id": "profile_header", "text": "Wilson Borba", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.target.testapp"},
+        {"resource_id": "clock", "text": "3:04 PM", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.android.systemui"},
+    ]
+
+    assert service.fingerprint(screen_at_1502) != service.fingerprint(screen_at_1504)  # unfiltered: still fooled by the clock
+    assert service.fingerprint(screen_at_1502, "com.target.testapp") == service.fingerprint(screen_at_1504, "com.target.testapp")
+
+
+def test_fingerprint_still_distinguishes_screens_that_differ_within_the_target_app() -> None:
+    # the filter isn't a blanket "ignore everything different", it only drops foreign-package
+    # noise; a real difference inside the app being mapped must still be caught
+    service = MapperFingerprintService()
+    profile_a = [{"resource_id": "profile_header", "text": "Alice", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.target.testapp"}]
+    profile_b = [{"resource_id": "profile_header", "text": "Bob", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.target.testapp"}]
+
+    assert service.fingerprint(profile_a, "com.target.testapp") != service.fingerprint(profile_b, "com.target.testapp")
+
+
+def test_structural_signature_also_ignores_foreign_package_noise() -> None:
+    service = MapperFingerprintService()
+    at_1502 = [{"resource_id": "feed_card", "text": "x", "content_desc": "", "class_name": "CardView", "clickable": True, "scrollable": True, "package_name": "com.target.testapp"}, {"resource_id": "clock", "text": "3:02 PM", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.android.systemui"}]
+    at_1504 = [{"resource_id": "feed_card", "text": "y", "content_desc": "", "class_name": "CardView", "clickable": True, "scrollable": True, "package_name": "com.target.testapp"}, {"resource_id": "clock", "text": "3:04 PM", "content_desc": "", "class_name": "TextView", "clickable": False, "scrollable": False, "package_name": "com.android.systemui"}]
+
+    assert service.structural_signature(at_1502, "com.target.testapp") == service.structural_signature(at_1504, "com.target.testapp")

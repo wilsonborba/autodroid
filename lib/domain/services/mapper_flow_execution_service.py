@@ -307,7 +307,7 @@ class MapperFlowExecutionService:
             last_result = self._run_step_once(step, flow_id=flow_id, skip_dangerous_actions=skip_dangerous_actions)
             iteration += 1
 
-            fingerprint = self._current_fingerprint()
+            fingerprint = self._current_fingerprint(step.package_name)
             if last_fingerprint is not None and fingerprint == last_fingerprint:
                 stop_reason = "no_new_content"
                 break
@@ -319,8 +319,12 @@ class MapperFlowExecutionService:
         )
         return {**last_result, "iterations_run": iteration, "stop_reason": stop_reason}
 
-    def _current_fingerprint(self) -> str:
-        return self.fingerprint_service.fingerprint(self.ui.dump_nodes())
+    def _current_fingerprint(self, package_name: str) -> str:
+        # package_name filters out volatile status-bar/launcher noise (clock, battery, signal
+        # icons) that isn't part of the app being driven, otherwise "no new content" (issue #47)
+        # would almost never trigger: the clock alone changes the fingerprint every minute even
+        # when the screen itself genuinely hasn't changed at all
+        return self.fingerprint_service.fingerprint(self.ui.dump_nodes(), package_name)
 
     def _within_execution_window(self, window_start: str, window_end: str) -> bool:
         start = time_of_day.fromisoformat(window_start)
