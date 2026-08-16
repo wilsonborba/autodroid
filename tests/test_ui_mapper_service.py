@@ -65,6 +65,7 @@ _TEST_PACKAGE_NAMES = (
     "com.candidatelog.testapp", "com.replaylog.testapp", "com.remapscreen.testapp",
     "com.returnverify.testapp", "com.localstate.testapp", "com.returnstate.testapp",
     "com.recoveryplanner.testapp", "com.recoveryrestart.testapp",
+    "com.frontier.testapp", "com.frontiercost.testapp", "com.multiroute.testapp",
 )
 
 
@@ -76,6 +77,8 @@ def _clean_sessions():
     # fresh one.
     names = ",".join(f"'{name}'" for name in _TEST_PACKAGE_NAMES)
     with SessionLocal() as session:
+        session.execute(text(f"DELETE FROM mapper_route_performance WHERE from_screen_id IN (SELECT id FROM mapper_screens WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names}))) OR to_screen_id IN (SELECT id FROM mapper_screens WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names})))"))
+        session.execute(text(f"DELETE FROM mapper_transition_performance WHERE transition_id IN (SELECT id FROM mapper_transitions WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names})))"))
         session.execute(text(f"DELETE FROM mapper_transitions WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names}))"))
         session.execute(text(f"DELETE FROM mapper_actions WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names}))"))
         session.execute(text(f"DELETE FROM mapper_nodes WHERE screen_id IN (SELECT id FROM mapper_screens WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names})))"))
@@ -743,6 +746,27 @@ def test_frontier_scheduler_prefers_cheapest_pending_target(monkeypatch) -> None
         frontier = service._build_exploration_frontier(repository, mapper_session.id, current_screen_id=root.id, max_depth=4)
 
     assert [item.screen_id for item in frontier] == [cheap.id, expensive.id]
+
+
+def test_restart_route_uses_shortest_known_incoming_path_not_first_recorded_parent() -> None:
+    service = build_service([])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.multiroute.testapp", mode=MapperMode.MEDIUM, skip_dangerous_actions=True, max_depth=4, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root", structural_signature="root", screen_key="root", depth=0, ordinal=0)
+        branch = repository.create_screen(session_id=mapper_session.id, fingerprint="branch", structural_signature="branch", screen_key="branch", depth=1, ordinal=1)
+        target = repository.create_screen(session_id=mapper_session.id, fingerprint="target", structural_signature="target", screen_key="target", depth=2, ordinal=2)
+        direct_action = repository.create_action(session_id=mapper_session.id, screen_id=root.id, node_id=None, action_key="click:direct", action_type="click", label="Direct", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[1,1][2,2]"})
+        branch_action = repository.create_action(session_id=mapper_session.id, screen_id=root.id, node_id=None, action_key="click:branch", action_type="click", label="Branch", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[3,3][4,4]"})
+        branch_to_target_action = repository.create_action(session_id=mapper_session.id, screen_id=branch.id, node_id=None, action_key="click:branch-target", action_type="click", label="Branch target", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[5,5][6,6]"})
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=root.id, action_id=branch_action.id, to_screen_id=branch.id, result_type="clicked")
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=branch.id, action_id=branch_to_target_action.id, to_screen_id=target.id, result_type="clicked")
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=root.id, action_id=direct_action.id, to_screen_id=target.id, result_type="clicked")
+        session.commit()
+
+        assert service._restart_action_ids(repository, target.id) == [direct_action.id]
+        assert service._root_screen_id(repository, target.id) == root.id
 
 
 def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:

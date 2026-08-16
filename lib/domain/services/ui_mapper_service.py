@@ -17,6 +17,7 @@ from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
 from lib.domain.services.mapper_route_planner_service import RESTART, MapperRoutePlannerService, RestartOption
+from lib.domain.services.mapper_route_graph import build_adjacency, dijkstra_shortest_path
 from lib.domain.services.mapper_safety_service import MapperSafetyService
 from lib.domain.services.navigation_context_service import NavigationContextService
 
@@ -1158,30 +1159,31 @@ class UiMapperService(MapperEngine):
             return False
         return self.fingerprint_service.fingerprint(nodes, package_name) == expected_fingerprint
 
-    def _restart_action_ids(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> list[int | None]:
-        action_ids: list[int | None] = []
-        current_screen_id = target_screen_id
-        seen_screens: set[int] = set()
-        while current_screen_id not in seen_screens:
-            seen_screens.add(current_screen_id)
-            transition = repository.find_transition_to_screen(current_screen_id)
-            if transition is None:
-                break
-            action_ids.append(transition.action_id)
-            current_screen_id = transition.from_screen_id
-        action_ids.reverse()
-        return action_ids
+    def _restart_action_ids(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> list[int]:
+        route = self._best_restart_route(repository, target_screen_id)
+        return [transition.action_id for transition in route if transition.action_id is not None]
 
     def _root_screen_id(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> int:
-        current_screen_id = target_screen_id
-        seen_screens: set[int] = set()
-        while current_screen_id not in seen_screens:
-            seen_screens.add(current_screen_id)
-            transition = repository.find_transition_to_screen(current_screen_id)
-            if transition is None:
-                return current_screen_id
-            current_screen_id = transition.from_screen_id
+        route = self._best_restart_route(repository, target_screen_id)
+        if route:
+            return route[0].from_screen_id
         return target_screen_id
+
+    def _best_restart_route(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> list[Any]:
+        target_screen = repository.get_screen(target_screen_id)
+        if target_screen is None:
+            return []
+        transitions = repository.list_transitions(target_screen.session_id)
+        adjacency = build_adjacency(transitions)
+        root_screens = sorted((screen for screen in repository.list_screens(target_screen.session_id) if screen.depth == 0), key=lambda screen: (screen.ordinal, screen.id))
+        best_route: list[Any] | None = None
+        for root_screen in root_screens:
+            route = dijkstra_shortest_path(adjacency, root_screen.id, target_screen_id, lambda transition: 1.0)
+            if route is None:
+                continue
+            if best_route is None or len(route) < len(best_route):
+                best_route = route
+        return best_route or []
 
     def _execute_known_return(
         self,
