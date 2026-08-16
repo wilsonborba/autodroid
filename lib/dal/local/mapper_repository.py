@@ -105,6 +105,29 @@ class SqlAlchemyMapperRepository:
         stmt = select(MapperScreen).where(MapperScreen.session_id == session_id, MapperScreen.fingerprint == fingerprint)
         return self.session.scalar(stmt)
 
+    def find_screen_by_structural_signature(self, session_id: int, structural_signature: str) -> MapperScreen | None:
+        stmt = (
+            select(MapperScreen)
+            .where(MapperScreen.session_id == session_id, MapperScreen.structural_signature == structural_signature)
+            .order_by(MapperScreen.ordinal)
+            .limit(1)
+        )
+        return self.session.scalar(stmt)
+
+    def record_screen_observation(self, screen_id: int, fingerprint: str) -> MapperScreen:
+        screen = self.session.get(MapperScreen, screen_id)
+        if screen is None:
+            raise ValueError(f"Mapper screen {screen_id} not found")
+        metadata = dict(screen.metadata_json or {})
+        observed_fingerprints = list(metadata.get("observed_fingerprints", []))
+        if fingerprint not in observed_fingerprints:
+            observed_fingerprints.append(fingerprint)
+        metadata["observed_fingerprints"] = observed_fingerprints
+        metadata["observation_count"] = len(observed_fingerprints)
+        screen.metadata_json = metadata
+        self.session.flush()
+        return screen
+
     def has_other_screen_with_structural_signature(self, session_id: int, structural_signature: str, *, exclude_screen_id: int) -> bool:
         """Issue #30: is this screen another instance of a type already represented in this
         session (e.g. yet another person's profile page)? Checked as soon as a screen is known
