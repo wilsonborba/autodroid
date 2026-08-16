@@ -33,3 +33,10 @@ from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutio
 
 def get_mapper_flow_execution_service() -> MapperFlowExecutionService:
     return MapperFlowExecutionService(_settings)
+
+
+from lib.domain.services.mapper_on_demand_service import MapperOnDemandService
+
+
+def get_mapper_on_demand_service() -> MapperOnDemandService:
+    return MapperOnDemandService(_settings)

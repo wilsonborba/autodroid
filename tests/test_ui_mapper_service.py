@@ -6,11 +6,12 @@ from sqlalchemy import text
 from lib.core.logs import get_logger
 from lib.dal.local.database import SessionLocal
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
-from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
+from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperScreenCompletionState, MapperSessionStatus
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
+from lib.domain.services.mapper_route_planner_service import DIRECT_PATH, RESTART, ExecutionPlan
 from lib.domain.services.mapper_safety_service import MapperSafetyService
-from lib.domain.services.ui_mapper_service import UiMapperService
+from lib.domain.services.ui_mapper_service import MapperFrontierItem, UiMapperService
 
 ROOT_NODES = [{"text": "Profile", "content_desc": "", "resource_id": "profile_btn", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True}]
 LEAF_NODES = [{"text": "", "content_desc": "", "resource_id": "", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True}]
@@ -37,13 +38,34 @@ ROOT_TWO_PROFILES = [
     {"resource_id": "open_profile_b", "text": "Profile B", "content_desc": "", "class_name": "TextView", "bounds": "[0,10][100,20]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"},
 ]
 
+EDITOR_ROOT = [
+    {"resource_id": "open_editor", "text": "Open editor", "content_desc": "", "class_name": "TextView", "bounds": "[0,0][100,10]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
+EDITOR_BASE = [
+    {"resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Not selected", "class_name": "TextView", "bounds": "[0,20][100,30]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+    {"resource_id": "editor_tab_contrast", "text": "Contrast", "content_desc": "Contrast, Not selected", "class_name": "TextView", "bounds": "[0,40][100,50]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
+EDITOR_BRIGHTNESS = [
+    {"resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Selected", "class_name": "TextView", "bounds": "[0,20][100,30]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+    {"resource_id": "editor_tab_contrast", "text": "Contrast", "content_desc": "Contrast, Not selected", "class_name": "TextView", "bounds": "[0,40][100,50]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
+EDITOR_CONTRAST = [
+    {"resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Not selected", "class_name": "TextView", "bounds": "[0,20][100,30]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+    {"resource_id": "editor_tab_contrast", "text": "Contrast", "content_desc": "Contrast, Selected", "class_name": "TextView", "bounds": "[0,40][100,50]", "clickable": True, "enabled": True, "package_name": "com.localstate.testapp"},
+]
+
 _TEST_PACKAGE_NAMES = (
     "com.fresh.testapp", "com.dangerous.testapp", "com.reuse.testapp", "com.override.testapp",
     "com.complement.testapp", "com.satisfied.testapp", "com.resume.testapp",
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
     "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
     "com.candidatelog.testapp", "com.replaylog.testapp", "com.remapscreen.testapp",
-    "com.returnverify.testapp",
+    "com.returnverify.testapp", "com.localstate.testapp", "com.returnstate.testapp",
+    "com.recoveryplanner.testapp", "com.recoveryrestart.testapp",
+    "com.frontier.testapp", "com.frontiercost.testapp", "com.multiroute.testapp",
 )
 
 
@@ -55,6 +77,8 @@ def _clean_sessions():
     # fresh one.
     names = ",".join(f"'{name}'" for name in _TEST_PACKAGE_NAMES)
     with SessionLocal() as session:
+        session.execute(text(f"DELETE FROM mapper_route_performance WHERE from_screen_id IN (SELECT id FROM mapper_screens WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names}))) OR to_screen_id IN (SELECT id FROM mapper_screens WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names})))"))
+        session.execute(text(f"DELETE FROM mapper_transition_performance WHERE transition_id IN (SELECT id FROM mapper_transitions WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names})))"))
         session.execute(text(f"DELETE FROM mapper_transitions WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names}))"))
         session.execute(text(f"DELETE FROM mapper_actions WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names}))"))
         session.execute(text(f"DELETE FROM mapper_nodes WHERE screen_id IN (SELECT id FROM mapper_screens WHERE session_id IN (SELECT id FROM mapper_sessions WHERE package_name IN ({names})))"))
@@ -145,6 +169,36 @@ def test_candidate_and_click_outcome_are_logged_at_debug_level(caplog) -> None:
     messages = [record.message for record in caplog.records]
     assert any("Candidate found: 'Profile'" in message for message in messages)
     assert any(message.startswith("Clicked 'Profile'") and "success=True" in message for message in messages)
+
+
+def test_local_state_controls_do_not_force_unwind_between_sibling_candidates() -> None:
+    service = build_service([
+        EDITOR_ROOT,
+        EDITOR_BASE,
+        EDITOR_BRIGHTNESS,
+        EDITOR_CONTRAST,
+        EDITOR_CONTRAST,
+        EDITOR_ROOT,
+    ])
+
+    result = service.run(MapperRunConfig(package_name="com.localstate.testapp", mode=MapperMode.MEDIUM))
+
+    assert result["actions_executed"] == 3  # open editor + brightness + contrast
+    assert service.ui.clicks == ["[0,0][100,10]", "[0,20][100,30]", "[0,40][100,50]"]
+    assert service.adb.back_calls == 1  # only leave the editor once, after exhausting its local state
+
+
+def test_local_state_control_heuristic_is_not_triggered_for_regular_navigation_links() -> None:
+    service = build_service([])
+
+    assert service._looks_like_local_state_control({
+        "resource_id": "connections_link", "text": "Connections", "content_desc": "", "class_name": "TextView",
+        "checkable": False, "checked": False,
+    }) is False
+    assert service._looks_like_local_state_control({
+        "resource_id": "editor_tab_brightness", "text": "Brightness", "content_desc": "Brightness, Selected", "class_name": "TextView",
+        "checkable": False, "checked": False,
+    }) is True
 
 
 def test_dangerous_action_is_blocked_by_default() -> None:
@@ -516,6 +570,205 @@ def test_navigate_back_ignores_a_back_looking_button_from_another_package() -> N
     assert service.adb.back_calls == 1
 
 
+def test_navigate_back_treats_cancel_as_a_valid_return_affordance() -> None:
+    screen_with_cancel = [{"text": "Cancel", "content_desc": "", "resource_id": "cancel_button", "class_name": "TextView", "bounds": "[10,10][20,20]", "clickable": True, "enabled": True, "package_name": "com.target.testapp"}]
+    service = build_service([screen_with_cancel])
+
+    service._navigate_back("com.target.testapp")
+
+    assert service.ui.clicks == ["[10,10][20,20]"]
+    assert service.adb.back_calls == 0
+
+
+def test_return_to_screen_persists_successful_system_back_as_a_known_return_edge() -> None:
+    service = build_service([IN_APP_ROOT, IN_APP_LEAF, IN_APP_LEAF, IN_APP_ROOT])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])
+        root = next(screen for screen in screens if screen.depth == 0)
+        leaf = next(screen for screen in screens if screen.depth == 1)
+        known_return = repository.find_known_return_action(result["session_id"], leaf.id, root.id)
+        assert known_return is not None
+        assert known_return.action_type == "system_back"
+        assert repository.get_screen_completion_state(leaf.id) == MapperScreenCompletionState.COMPLETE
+        transition = repository.find_transition_by_action(known_return.id)
+        assert transition is not None
+        assert transition.from_screen_id == leaf.id
+        assert transition.to_screen_id == root.id
+
+
+def test_return_to_screen_reuses_a_known_in_app_return_action_before_generic_back() -> None:
+    root_dump = [{"text": "Root", "content_desc": "", "resource_id": "root", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
+    modal_dump = [{"text": "Modal", "content_desc": "", "resource_id": "modal", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": "com.target.testapp"}]
+    service = build_service([modal_dump, root_dump])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.target.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(root_dump, "com.target.testapp"), structural_signature=service.fingerprint_service.structural_signature(root_dump, "com.target.testapp"), screen_key="root", depth=0, ordinal=0)
+        modal = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(modal_dump, "com.target.testapp"), structural_signature=service.fingerprint_service.structural_signature(modal_dump, "com.target.testapp"), screen_key="modal", depth=1, ordinal=1)
+        action = repository.create_action(session_id=mapper_session.id, screen_id=modal.id, node_id=None, action_key="return:click:[9,9][10,10]", action_type="click", label="Close", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[9,9][10,10]"})
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=modal.id, action_id=action.id, to_screen_id=root.id, result_type="clicked", metadata_json={"navigation_kind": "return_action"})
+        session.commit()
+        service._return_to_screen(repository, mapper_session.id, "com.target.testapp", [], departed=False, expected_screen_id=root.id, expected_fingerprint=root.fingerprint)
+
+    assert service.ui.clicks == ["[9,9][10,10]"]
+    assert service.adb.back_calls == 0
+
+
+def test_reset_screen_expanded_resets_completion_state_to_pending() -> None:
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.target.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        screen = repository.create_screen(session_id=mapper_session.id, fingerprint="fp", structural_signature="sig", screen_key="screen", depth=0, ordinal=0, metadata_json={"completion_state": MapperScreenCompletionState.COMPLETE.value})
+        repository.reset_screen_expanded(screen.id)
+        assert repository.get_screen_completion_state(screen.id) == MapperScreenCompletionState.PENDING
+
+
+def test_failed_return_marks_screen_as_resume_needed() -> None:
+    root = [
+        {"text": "A", "content_desc": "", "resource_id": "btn_a", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.returnstate.testapp"},
+    ]
+    leaf = [{"resource_id": "leaf_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,40][5,45]", "clickable": False, "enabled": True, "package_name": "com.returnstate.testapp"}]
+    wrong_screen = [{"resource_id": "wrong_screen_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,80][5,85]", "clickable": False, "enabled": True, "package_name": "com.returnstate.testapp"}]
+    service = build_service([root, leaf, leaf, wrong_screen])
+
+    result = service.run(MapperRunConfig(package_name="com.returnstate.testapp", mode=MapperMode.LIGHT))
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])
+        leaf_screen = next(screen for screen in screens if screen.depth == 1)
+        assert repository.get_screen_completion_state(leaf_screen.id) == MapperScreenCompletionState.RESUME_NEEDED
+
+
+def test_failed_return_uses_direct_route_planner_recovery_before_restart() -> None:
+    package_name = "com.recoveryplanner.testapp"
+    root_dump = [{"text": "Root", "content_desc": "", "resource_id": "root", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    current_dump = [{"text": "Current", "content_desc": "", "resource_id": "current", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    wrong_dump = [{"text": "Wrong", "content_desc": "", "resource_id": "wrong", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    service = build_service([current_dump, wrong_dump, root_dump])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(root_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(root_dump, package_name), screen_key="root", depth=0, ordinal=0)
+        current = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(current_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(current_dump, package_name), screen_key="current", depth=1, ordinal=1)
+        node = repository.create_node(screen_id=current.id, node_key="recover", text="Recover", bounds="[9,9][10,10]", clickable=True, package_name=package_name)
+        action = repository.create_action(session_id=mapper_session.id, screen_id=current.id, node_id=node.id, action_key="click:recover", action_type="click", label="Recover", safety=MapperActionSafety.SAFE, executed=True, success=True)
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=current.id, action_id=action.id, to_screen_id=root.id, result_type="clicked")
+        session.commit()
+
+        service._return_to_screen(repository, mapper_session.id, package_name, [], departed=False, expected_screen_id=root.id, expected_fingerprint=root.fingerprint)
+
+    assert service.ui.clicks == ["[9,9][10,10]"]
+    assert service.adb.back_calls == 1  # the initial naive back failed, then the planner recovered directly
+    assert service.navigation_context.prepared == []
+
+
+def test_failed_return_can_choose_restart_via_mapper_recovery_planner(monkeypatch) -> None:
+    package_name = "com.recoveryrestart.testapp"
+    root_dump = [{"text": "Root", "content_desc": "", "resource_id": "root", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    current_dump = [{"text": "Current", "content_desc": "", "resource_id": "current", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    wrong_dump = [{"text": "Wrong", "content_desc": "", "resource_id": "wrong", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    service = build_service([current_dump, wrong_dump, root_dump])
+
+    def fake_plan(self, *, session_id: int, current_screen_id: int, target_screen_id: int, restart_option):
+        return ExecutionPlan(strategy_type=RESTART, route=[], route_signature="restart:test", from_screen_id=current_screen_id, to_screen_id=target_screen_id, estimated_duration_ms=1.0, reason="forced_restart")
+
+    monkeypatch.setattr("lib.domain.services.ui_mapper_service.MapperRoutePlannerService.plan", fake_plan)
+    monkeypatch.setattr("lib.domain.services.ui_mapper_service.MapperRoutePlannerService.record_execution", lambda self, plan, *, actual_duration_ms, success: None)
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(root_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(root_dump, package_name), screen_key="root", depth=0, ordinal=0)
+        current = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(current_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(current_dump, package_name), screen_key="current", depth=1, ordinal=1)
+        session.commit()
+
+        service._return_to_screen(repository, mapper_session.id, package_name, [], departed=False, expected_screen_id=root.id, expected_fingerprint=root.fingerprint)
+
+    assert service.ui.clicks == []
+    assert service.adb.back_calls == 1
+    assert service.navigation_context.prepared == [package_name]
+
+
+def test_frontier_scheduler_prefers_pending_screen_over_complete_corridors() -> None:
+    package_name = "com.frontier.testapp"
+    service = build_service([])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.MEDIUM, skip_dangerous_actions=True, max_depth=3, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root-fp", structural_signature="root-sig", screen_key="root", depth=0, ordinal=0)
+        complete_branch = repository.create_screen(session_id=mapper_session.id, fingerprint="complete-fp", structural_signature="complete-sig", screen_key="complete", depth=1, ordinal=1)
+        pending_branch = repository.create_screen(session_id=mapper_session.id, fingerprint="pending-fp", structural_signature="pending-sig", screen_key="pending", depth=1, ordinal=2)
+        repository.set_screen_completion_state(root.id, MapperScreenCompletionState.COMPLETE)
+        repository.set_screen_completion_state(complete_branch.id, MapperScreenCompletionState.COMPLETE)
+        repository.set_screen_completion_state(pending_branch.id, MapperScreenCompletionState.RESUME_NEEDED)
+        session.commit()
+
+        frontier = service._build_exploration_frontier(repository, mapper_session.id, current_screen_id=root.id, max_depth=3)
+
+    assert [item.screen_id for item in frontier] == [pending_branch.id]
+
+
+def test_frontier_scheduler_prefers_cheapest_pending_target(monkeypatch) -> None:
+    package_name = "com.frontiercost.testapp"
+    service = build_service([])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.MEDIUM, skip_dangerous_actions=True, max_depth=4, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root-fp", structural_signature="root-sig", screen_key="root", depth=0, ordinal=0)
+        cheap = repository.create_screen(session_id=mapper_session.id, fingerprint="cheap-fp", structural_signature="cheap-sig", screen_key="cheap", depth=2, ordinal=1)
+        expensive = repository.create_screen(session_id=mapper_session.id, fingerprint="expensive-fp", structural_signature="expensive-sig", screen_key="expensive", depth=1, ordinal=2)
+        repository.set_screen_completion_state(root.id, MapperScreenCompletionState.COMPLETE)
+        repository.set_screen_completion_state(cheap.id, MapperScreenCompletionState.RESUME_NEEDED)
+        repository.set_screen_completion_state(expensive.id, MapperScreenCompletionState.RESUME_NEEDED)
+        session.commit()
+
+        def fake_frontier_item(repository, session_id, *, current_screen_id, screen_id, completion_state):
+            estimated = 25.0 if screen_id == cheap.id else 80.0
+            return service.__class__.__dict__["_frontier_item_for_screen"].__annotations__ and MapperFrontierItem(
+                screen_id=screen_id,
+                depth=repository.get_screen(screen_id).depth,
+                completion_state=completion_state,
+                strategy_type="direct_path",
+                estimated_duration_ms=estimated,
+                reason="fake_cost",
+            )
+
+        monkeypatch.setattr(service, "_frontier_item_for_screen", fake_frontier_item)
+        frontier = service._build_exploration_frontier(repository, mapper_session.id, current_screen_id=root.id, max_depth=4)
+
+    assert [item.screen_id for item in frontier] == [cheap.id, expensive.id]
+
+
+def test_restart_route_uses_shortest_known_incoming_path_not_first_recorded_parent() -> None:
+    service = build_service([])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.multiroute.testapp", mode=MapperMode.MEDIUM, skip_dangerous_actions=True, max_depth=4, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root", structural_signature="root", screen_key="root", depth=0, ordinal=0)
+        branch = repository.create_screen(session_id=mapper_session.id, fingerprint="branch", structural_signature="branch", screen_key="branch", depth=1, ordinal=1)
+        target = repository.create_screen(session_id=mapper_session.id, fingerprint="target", structural_signature="target", screen_key="target", depth=2, ordinal=2)
+        direct_action = repository.create_action(session_id=mapper_session.id, screen_id=root.id, node_id=None, action_key="click:direct", action_type="click", label="Direct", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[1,1][2,2]"})
+        branch_action = repository.create_action(session_id=mapper_session.id, screen_id=root.id, node_id=None, action_key="click:branch", action_type="click", label="Branch", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[3,3][4,4]"})
+        branch_to_target_action = repository.create_action(session_id=mapper_session.id, screen_id=branch.id, node_id=None, action_key="click:branch-target", action_type="click", label="Branch target", safety=MapperActionSafety.SAFE, executed=True, success=True, metadata_json={"bounds": "[5,5][6,6]"})
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=root.id, action_id=branch_action.id, to_screen_id=branch.id, result_type="clicked")
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=branch.id, action_id=branch_to_target_action.id, to_screen_id=target.id, result_type="clicked")
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=root.id, action_id=direct_action.id, to_screen_id=target.id, result_type="clicked")
+        session.commit()
+
+        assert service._restart_action_ids(repository, target.id) == [direct_action.id]
+        assert service._root_screen_id(repository, target.id) == root.id
+
+
 def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:
     # root -> Profile A (first of its type, fully explored: both its own name header and its
     # Connections link are candidates, issue #37, the header is labeled even though it's not
@@ -541,15 +794,30 @@ def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> No
 
     result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
 
-    assert result["screens_recorded"] == 5  # root, Alice, her header's destination, Connections, Bob
+    assert result["screens_recorded"] == 4  # root, Alice, her header's destination, Connections; Bob reuses Alice's canonical screen
     assert service.ui.clicks.count("[0,20][100,30]") == 1  # Connections: tried once (Alice), not for Bob
 
     with SessionLocal() as session:
         repository = SqlAlchemyMapperRepository(session)
-        screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, header_dest, connections, Bob
-        bob_screen = screens[4]
-        assert bob_screen.expanded is True  # deduped screens still end up expanded=True
-        assert repository.list_actions(result["session_id"], screen_id=bob_screen.id) == []  # never got its own candidates tried
+        screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, header_dest, connections
+        alice_screen = screens[1]
+        assert alice_screen.expanded is True
+        assert alice_screen.metadata_json["observation_count"] == 2
+        assert len(alice_screen.metadata_json["observed_fingerprints"]) == 2
+
+
+def test_structural_revisit_reuses_canonical_screen_row() -> None:
+    service = build_service([ROOT_TWO_PROFILES, _profile_dump("Alice"), ROOT_TWO_PROFILES, _profile_dump("Bob")])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])
+        assert len(screens) == 2
+        canonical_profile = screens[1]
+        assert canonical_profile.metadata_json["observation_count"] == 2
+        assert len(canonical_profile.metadata_json["observed_fingerprints"]) == 2
 
 
 def _fixed_content_dump(section_text: str) -> list[dict]:
@@ -696,7 +964,7 @@ def test_replay_target_logs_why_an_action_is_not_replayable(caplog) -> None:
         repository = SqlAlchemyMapperRepository(session)
         service._replay_target(repository, repository.get_action(action_id))
 
-    assert any("already fully expanded" in record.message for record in caplog.records)
+    assert any("already content-complete" in record.message or "already fully expanded" in record.message for record in caplog.records)
 
 
 class _EventLoggingUi(FakeUi):

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from lib.core.utils.clock import utc_now
@@ -32,6 +32,7 @@ class MapperSession(Base):
     screens: Mapped[list[MapperScreen]] = relationship(back_populates="session", cascade="all, delete-orphan")
     actions: Mapped[list[MapperAction]] = relationship(back_populates="session", cascade="all, delete-orphan")
     transitions: Mapped[list[MapperTransition]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    runtime_snapshots: Mapped[list[MapperRuntimeSnapshot]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 
 class MapperScreen(Base):
@@ -112,3 +113,38 @@ class MapperTransition(Base):
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     session: Mapped[MapperSession] = relationship(back_populates="transitions")
+
+
+class MapperRuntimeSnapshot(Base):
+    __tablename__ = "mapper_runtime_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("mapper_sessions.id", ondelete="CASCADE"), nullable=False)
+    package_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    activity_kind: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    current_screen_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_screen_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    route_signature: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    restart_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recovery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revisit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    planner_restart_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    planner_direct_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    known_return_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    repeated_route_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    repeated_context_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    seconds_since_last_meaningful_progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clicks_since_last_meaningful_progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_screens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_actions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_transitions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending_screens_delta: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_screens_delta: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    progress_delta: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    session: Mapped[MapperSession] = relationship(back_populates="runtime_snapshots")

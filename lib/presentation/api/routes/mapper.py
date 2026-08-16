@@ -3,23 +3,34 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from lib.core.logs import get_logger
-from lib.presentation.api.dependencies import get_mapper_engine, get_mapper_export_service, get_session, get_settings
+from lib.presentation.api.dependencies import get_mapper_engine, get_mapper_export_service, get_mapper_on_demand_service, get_session, get_settings
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.services.job_queue_service import JobQueueService
+from lib.domain.services.mapper_churn_service import MapperChurnService
+from lib.domain.services.mapper_progress_service import MapperProgressService
 from lib.presentation.api.schemas.mapper_schemas import (
+    MapperActivityResponse,
     MapperActionResponse,
+    MapperChurnStatusResponse,
     MapperExportResponse,
     MapperGraphResponse,
     MapperNodeResponse,
+    MapperOnDemandActionRequest,
+    MapperOnDemandActionResponse,
+    MapperOnDemandInspectResponse,
+    MapperOnDemandStartResponse,
     MapperRemapCandidateResponse,
     MapperRemapJobResponse,
     MapperRemapRequest,
     MapperRemapResponse,
     MapperRunRequest,
     MapperRunResponse,
+    MapperRuntimeSnapshotResponse,
+    MapperScreenProgressResponse,
     MapperScreenRemapResponse,
+    MapperSessionProgressResponse,
     MapperScreenResponse,
     MapperSessionResponse,
     MapperTransitionResponse,
@@ -62,6 +73,38 @@ def run_mapper(payload: MapperRunRequest):
     return MapperRunResponse(**result)
 
 
+@router.get("/apps", response_model=list[str], summary="List installed app packages visible to the device")
+def list_installed_packages():
+    return get_mapper_on_demand_service().list_packages()
+
+
+@router.post("/apps/{package_name}/start", response_model=MapperOnDemandStartResponse, summary="Start an app with a fresh launch for on-demand mapper use")
+def start_mapper_app(package_name: str):
+    return MapperOnDemandStartResponse(**get_mapper_on_demand_service().start_app(package_name))
+
+
+@router.get("/on-demand/inspect", response_model=MapperOnDemandInspectResponse, summary="Inspect the current screen with mapper-aware persistence")
+def inspect_on_demand_screen(package_name: str, session_id: int | None = None):
+    try:
+        return MapperOnDemandInspectResponse(**get_mapper_on_demand_service().inspect(package_name, session_id=session_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/on-demand/actions", response_model=MapperOnDemandActionResponse, summary="Execute one guided on-demand mapper action and persist what was learned")
+def execute_on_demand_mapper_action(payload: MapperOnDemandActionRequest):
+    try:
+        return MapperOnDemandActionResponse(**get_mapper_on_demand_service().act(
+            payload.package_name,
+            session_id=payload.session_id,
+            action_id=payload.action_id,
+            bounds=payload.bounds,
+            action_type=payload.action_type,
+        ))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/sessions", response_model=list[MapperSessionResponse], summary="List mapper sessions, newest first")
 def list_mapper_sessions(limit: int = 50):
     with get_session() as session:
@@ -78,6 +121,72 @@ def show_mapper_session(session_id: int):
         if mapper_session is None:
             raise HTTPException(status_code=404, detail="Mapper session not found")
         return MapperSessionResponse.model_validate(mapper_session, from_attributes=True)
+
+
+@router.get("/sessions/{session_id}/progress", response_model=MapperSessionProgressResponse, summary="Get structured live progress for a mapper session")
+def show_mapper_session_progress(session_id: int):
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        try:
+            payload = progress.get_session_progress(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return MapperSessionProgressResponse(**payload)
+
+
+@router.get("/sessions/{session_id}/progress/activity", response_model=MapperActivityResponse, summary="Get the mapper's current live activity for a session")
+def show_mapper_session_activity(session_id: int):
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        try:
+            payload = progress.get_current_activity(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return MapperActivityResponse(**payload)
+
+
+@router.get("/sessions/{session_id}/progress/screens", response_model=list[MapperScreenProgressResponse], summary="List per-screen progress for a mapper session")
+def list_mapper_screen_progress(session_id: int):
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        try:
+            payload = progress.list_screen_progress(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return [MapperScreenProgressResponse(**item) for item in payload]
+
+
+@router.get("/sessions/{session_id}/progress/screens/{screen_id}", response_model=MapperScreenProgressResponse, summary="Get one screen's structured mapper progress")
+def show_mapper_screen_progress(session_id: int, screen_id: int):
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        try:
+            payload = progress.get_screen_progress(session_id, screen_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return MapperScreenProgressResponse(**payload)
+
+
+@router.get("/sessions/{session_id}/churn", response_model=MapperChurnStatusResponse, summary="Get live operational churn scoring and recommendations for a mapper session")
+def show_mapper_session_churn(session_id: int):
+    with get_session() as session:
+        churn = MapperChurnService(session, get_settings())
+        try:
+            payload = churn.get_live_churn(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return MapperChurnStatusResponse(**payload)
+
+
+@router.get("/sessions/{session_id}/churn/telemetry", response_model=list[MapperRuntimeSnapshotResponse], summary="List persisted runtime telemetry snapshots for a mapper session")
+def list_mapper_session_runtime_telemetry(session_id: int, limit: int = 50):
+    with get_session() as session:
+        churn = MapperChurnService(session, get_settings())
+        try:
+            payload = churn.list_runtime_snapshots(session_id, limit=limit)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return [MapperRuntimeSnapshotResponse(**item) for item in payload]
 
 
 @router.post(
