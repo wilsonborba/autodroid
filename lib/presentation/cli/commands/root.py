@@ -18,6 +18,7 @@ from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, Mappe
 from lib.domain.services.job_queue_service import JobQueueService
 from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
 from lib.domain.services.mapper_flow_service import MapperFlowService
+from lib.domain.services.mapper_progress_service import MapperProgressService
 from lib.domain.services.ui_mapper_service import UiMapperService
 from lib.domain.services.worker_service import WorkerService
 from lib.presentation.cli.formatters.job_formatter import JobFormatter
@@ -278,6 +279,26 @@ def show_mapper_session(session_id: int, as_json: bool = False) -> None:
             typer.echo(JsonOutput.render(payload))
             return
         typer.echo(str(payload))
+
+
+@mapper_app.command("progress")
+def show_mapper_progress(session_id: int, as_json: bool = False) -> None:
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        payload = progress.get_session_progress(session_id)
+        screens = progress.list_screen_progress(session_id)
+        payload["screens"] = screens[:10]
+        if as_json:
+            typer.echo(JsonOutput.render(payload))
+            return
+        typer.echo(f"session #{payload['session_id']} {payload['package_name']} [{payload['mode']}] status={payload['status']} progress={payload['progress_percent']}%")
+        activity = payload.get('current_activity') or {}
+        if activity:
+            typer.echo(f"  activity={activity.get('activity_kind')} current={activity.get('current_screen_id')} target={activity.get('target_screen_id')} strategy={activity.get('strategy_type')}")
+        typer.echo(f"  screens total={payload['screen_counts']['total']} pending={payload['screen_counts']['pending']} resume_needed={payload['screen_counts']['resume_needed']} complete={payload['screen_counts']['complete']}")
+        for item in screens[:10]:
+            marker = '*' if item['is_current_target'] else '-'
+            typer.echo(f"  {marker} screen #{item['screen_id']} {item['screen_key']} depth={item['depth']} state={item['completion_state']} progress={item['progress_percent']}% pending={item['pending_candidates']}")
 
 
 @mapper_app.command("export")

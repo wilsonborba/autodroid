@@ -142,6 +142,30 @@ class UiMapperService(MapperEngine):
             repository.session.commit()  # the session row itself must survive a crash, not just its data (issue #25)
             return self._continue_session(repository, mapper_session, target_max_depth=limits.max_depth, limits=limits, config=config, fresh=True)
 
+    def _set_current_activity(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        *,
+        activity_kind: str,
+        current_screen_id: int | None = None,
+        target_screen_id: int | None = None,
+        strategy_type: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        repository.update_session_metadata(session_id, {
+            "current_activity": {
+                "activity_kind": activity_kind,
+                "current_screen_id": current_screen_id,
+                "target_screen_id": target_screen_id,
+                "strategy_type": strategy_type,
+                "reason": reason,
+            }
+        })
+
+    def _mark_meaningful_progress(self, repository: SqlAlchemyMapperRepository, session_id: int) -> None:
+        repository.update_session_metadata(session_id, {"last_meaningful_progress_at": utc_now().isoformat()})
+
     def _continue_session(
         self,
         repository: SqlAlchemyMapperRepository,
@@ -162,6 +186,7 @@ class UiMapperService(MapperEngine):
             mapper_session.max_consecutive_empty_scrolls = max(mapper_session.max_consecutive_empty_scrolls, limits.max_consecutive_empty_scrolls)
             repository.session.commit()
 
+        self._set_current_activity(repository, mapper_session.id, activity_kind="starting", reason="session_continue")
         state = self._load_state(repository, mapper_session.id)
         visited_this_pass: set[int] = set()
         current_screen_id = self._explore(
@@ -190,6 +215,7 @@ class UiMapperService(MapperEngine):
             package_name=config.package_name,
         )
 
+        self._set_current_activity(repository, mapper_session.id, activity_kind="completed")
         mapper_session.status = MapperSessionStatus.COMPLETED
         mapper_session.finished_at = utc_now()
         mapper_session.explored_up_to_depth = target_max_depth
@@ -246,6 +272,7 @@ class UiMapperService(MapperEngine):
             if not frontier:
                 return
             target = frontier[0]
+            self._set_current_activity(repository, session_id, activity_kind="frontier_target_selected", current_screen_id=current_screen_id, target_screen_id=target.screen_id, strategy_type=target.strategy_type, reason=target.reason)
             self.logger.info(
                 "Mapper frontier selected screen %s (state=%s strategy=%s estimated_ms=%.0f reason=%s)",
                 target.screen_id,
@@ -449,6 +476,7 @@ class UiMapperService(MapperEngine):
                 package_name=package_name,
             )
 
+            self._set_current_activity(repository, mapper_session.id, activity_kind="completed")
             mapper_session.status = MapperSessionStatus.COMPLETED
             mapper_session.finished_at = utc_now()
             mapper_session.explored_up_to_depth = max(mapper_session.explored_up_to_depth, screen.depth)
@@ -505,6 +533,7 @@ class UiMapperService(MapperEngine):
             visited_this_pass.add(screen.id)
             persisted_nodes = repository.get_screen(screen.id).nodes
             node_id_by_key = {node.node_key: node.id for node in persisted_nodes}
+            self._set_current_activity(repository, session_id, activity_kind="exploring_screen", current_screen_id=screen.id, target_screen_id=screen.id)
             self.logger.debug("Revisiting known screen %s at depth %s (visit_count=%s, expanded=%s)", screen.id, depth, screen.visit_count, existing_screen.expanded)
 
             if peek_only or depth >= max_depth:
@@ -557,6 +586,7 @@ class UiMapperService(MapperEngine):
             if canonical_screen.id in visited_this_pass:
                 return canonical_screen.id
             visited_this_pass.add(canonical_screen.id)
+            self._set_current_activity(repository, session_id, activity_kind="exploring_screen", current_screen_id=canonical_screen.id, target_screen_id=canonical_screen.id, reason="canonical_reuse")
             self.logger.info(
                 "Structural screen %s matched canonical screen %s; reusing canonical persistence instead of creating a duplicate screen row",
                 structural_signature[:12], canonical_screen.id,
@@ -596,6 +626,8 @@ class UiMapperService(MapperEngine):
         # else in one giant uncommitted transaction
         repository.session.commit()
         visited_this_pass.add(screen.id)
+        self._set_current_activity(repository, session_id, activity_kind="exploring_screen", current_screen_id=screen.id, target_screen_id=screen.id)
+        self._mark_meaningful_progress(repository, session_id)
         self.logger.debug("Created screen %s at depth %s (fingerprint=%s, %s node(s) persisted)", screen.id, depth, fingerprint[:12], len(nodes))
 
         if peek_only:
@@ -662,6 +694,7 @@ class UiMapperService(MapperEngine):
         while True:
             if depth < max_depth:
                 candidates = self._extract_candidates(accumulated_nodes, package_name)
+                repository.update_screen_metadata(screen.id, {"known_candidate_count": len(candidates), "accumulated_node_count": len(accumulated_nodes)})
                 self.logger.debug("Screen %s: %s candidate(s) extracted (%s accumulated node(s) so far)", screen.id, len(candidates), len(accumulated_nodes))
                 self._process_candidates(
                     repository, session_id, screen, candidates, node_id_by_key,
@@ -792,6 +825,7 @@ class UiMapperService(MapperEngine):
 
             safety = self.safety_service.classify(candidate.node, candidate.label)
             self.logger.debug("Candidate found: %r (bounds=%s, safety=%s)", candidate.label, candidate.bounds, safety.value)
+            repository.update_screen_metadata(screen.id, {"last_candidate_label": candidate.label})
             action = repository.create_action(
                 session_id=session_id,
                 screen_id=screen.id,
@@ -823,6 +857,7 @@ class UiMapperService(MapperEngine):
             action.executed = True
             action.success = success
             state["actions_executed"] += 1
+            repository.update_screen_metadata(screen.id, {"last_candidate_label": candidate.label, "attempted_candidate_count": sum(1 for item in repository.list_actions(session_id, screen_id=screen.id) if not item.action_key.startswith("return:") and item.executed), "successful_candidate_count": sum(1 for item in repository.list_actions(session_id, screen_id=screen.id) if not item.action_key.startswith("return:") and item.success is True)})
             self.logger.debug("Clicked %r (bounds=%s) -> success=%s", candidate.label, candidate.bounds, success)
             if success:
                 # reveals a sub-interface without necessarily doing anything itself ("Message"
@@ -832,6 +867,8 @@ class UiMapperService(MapperEngine):
                 if peek:
                     self.logger.debug("Candidate %r is a peek target: cataloguing whatever it reveals without exploring further", candidate.label)
                 to_screen_id = self._explore(repository, session_id, depth=depth + 1, state=state, visited_this_pass=visited_this_pass, max_depth=max_depth, max_actions=max_actions, max_scrolls=0, max_consecutive_empty_scrolls=max_consecutive_empty_scrolls, config_skip_dangerous_actions=config_skip_dangerous_actions, package_name=package_name, ancestor_bounds=ancestor_bounds + [candidate.bounds], peek_only=peek)
+                if to_screen_id is not None:
+                    self._mark_meaningful_progress(repository, session_id)
                 navigation_kind = self._transition_navigation_kind(repository, from_screen_id=screen.id, to_screen_id=to_screen_id, node=candidate.node)
                 action.metadata_json = {**(action.metadata_json or {}), "navigation_kind": navigation_kind}
                 repository.create_transition(

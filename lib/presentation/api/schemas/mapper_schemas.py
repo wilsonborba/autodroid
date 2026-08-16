@@ -53,6 +53,49 @@ class MapperSessionResponse(BaseModel):
     created_at: datetime
 
 
+class MapperActivityResponse(BaseModel):
+    activity_kind: str | None = None
+    current_screen_id: int | None = None
+    target_screen_id: int | None = None
+    strategy_type: str | None = None
+    reason: str | None = None
+
+
+class MapperSessionProgressResponse(BaseModel):
+    session_id: int
+    package_name: str
+    mode: str
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    progress_percent: float
+    screen_counts: dict[str, int]
+    action_counts: dict[str, int]
+    transition_count: int
+    revisited_screens: int
+    current_activity: dict[str, Any]
+    last_meaningful_progress_at: str | None = None
+
+
+class MapperScreenProgressResponse(BaseModel):
+    screen_id: int
+    screen_key: str
+    depth: int
+    visit_count: int
+    completion_state: str
+    is_current_screen: bool
+    is_current_target: bool
+    known_candidates: int
+    attempted_candidates: int
+    successful_candidates: int
+    pending_candidates: int
+    known_children: int
+    progress_percent: float
+    last_activity_at: str | None = None
+    observation_count: int = 1
+
+
 class MapperExportResponse(BaseModel):
     session_id: int
     export_path: str

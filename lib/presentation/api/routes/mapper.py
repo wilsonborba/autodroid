@@ -8,6 +8,7 @@ from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, Mappe
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.services.job_queue_service import JobQueueService
+from lib.domain.services.mapper_progress_service import MapperProgressService
 from lib.presentation.api.schemas.mapper_schemas import (
     MapperActionResponse,
     MapperExportResponse,
@@ -19,7 +20,9 @@ from lib.presentation.api.schemas.mapper_schemas import (
     MapperRemapResponse,
     MapperRunRequest,
     MapperRunResponse,
+    MapperScreenProgressResponse,
     MapperScreenRemapResponse,
+    MapperSessionProgressResponse,
     MapperScreenResponse,
     MapperSessionResponse,
     MapperTransitionResponse,
@@ -78,6 +81,39 @@ def show_mapper_session(session_id: int):
         if mapper_session is None:
             raise HTTPException(status_code=404, detail="Mapper session not found")
         return MapperSessionResponse.model_validate(mapper_session, from_attributes=True)
+
+
+@router.get("/sessions/{session_id}/progress", response_model=MapperSessionProgressResponse, summary="Get structured live progress for a mapper session")
+def show_mapper_session_progress(session_id: int):
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        try:
+            payload = progress.get_session_progress(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return MapperSessionProgressResponse(**payload)
+
+
+@router.get("/sessions/{session_id}/progress/screens", response_model=list[MapperScreenProgressResponse], summary="List per-screen progress for a mapper session")
+def list_mapper_screen_progress(session_id: int):
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        try:
+            payload = progress.list_screen_progress(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return [MapperScreenProgressResponse(**item) for item in payload]
+
+
+@router.get("/sessions/{session_id}/progress/screens/{screen_id}", response_model=MapperScreenProgressResponse, summary="Get one screen's structured mapper progress")
+def show_mapper_screen_progress(session_id: int, screen_id: int):
+    with get_session() as session:
+        progress = MapperProgressService(session)
+        try:
+            payload = progress.get_screen_progress(session_id, screen_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return MapperScreenProgressResponse(**payload)
 
 
 @router.post(
