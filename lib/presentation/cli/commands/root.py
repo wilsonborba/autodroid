@@ -11,6 +11,7 @@ from alembic.config import Config
 
 from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
 from lib.core.logs import LogTarget, configure_logging, get_logger
+from lib.core.net import clear_api_state, find_available_port, write_api_state
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
@@ -186,10 +187,26 @@ def db_revision(message: str) -> None:
 def serve_api(host: str = "127.0.0.1", port: int = 8000) -> None:
     """Starts the FastAPI/uvicorn server. A top-level command, not under `worker`: the API
     server and the worker/dispatcher (`worker run`) are two separate processes the user runs
-    side by side, and this one never touches the dispatcher, so it shouldn't read as if it did."""
+    side by side, and this one never touches the dispatcher, so it shouldn't read as if it did.
+
+    Verifies `port` is actually free before binding (falls forward to the next free one instead
+    of just crashing on bind if it's taken, issue #44) and writes the resolved host/port to a
+    local state file so anything that needs to reach this API later can read it instead of
+    guessing or scanning ports blind.
+    """
     import uvicorn
 
-    uvicorn.run(create_api_app(), host=host, port=port)
+    settings = get_settings()
+    resolved_port = find_available_port(host, port)
+    if resolved_port != port:
+        typer.echo(f"Port {port} is taken, using {resolved_port} instead")
+
+    write_api_state(settings.api_state_file, host=host, port=resolved_port)
+    typer.echo(f"Starting autodroid API on http://{host}:{resolved_port} (state: {settings.api_state_file})")
+    try:
+        uvicorn.run(create_api_app(), host=host, port=resolved_port)
+    finally:
+        clear_api_state(settings.api_state_file)
 
 
 @mapper_app.command("run")
