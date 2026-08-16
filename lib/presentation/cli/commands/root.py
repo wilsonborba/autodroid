@@ -11,7 +11,7 @@ from alembic.config import Config
 
 from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
 from lib.core.logs import LogTarget, configure_logging, get_logger
-from lib.core.net import clear_api_state, find_available_port, write_api_state
+from lib.core.net import clear_api_state, find_available_port, is_port_available, write_api_state
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
@@ -183,23 +183,36 @@ def db_revision(message: str) -> None:
     command.revision(Config("alembic.ini"), message=message, autogenerate=True)
 
 
+DEFAULT_API_PORT = 8000
+
+
 @app.command("serve-api")
-def serve_api(host: str = "127.0.0.1", port: int = 8000) -> None:
+def serve_api(
+    host: str = "127.0.0.1",
+    port: int | None = typer.Option(None, help="Port to bind. Given explicitly: used as-is, fails loudly if it's taken. Omitted: an available port is found automatically starting from 8000, and reported."),
+) -> None:
     """Starts the FastAPI/uvicorn server. A top-level command, not under `worker`: the API
     server and the worker/dispatcher (`worker run`) are two separate processes the user runs
     side by side, and this one never touches the dispatcher, so it shouldn't read as if it did.
 
-    Verifies `port` is actually free before binding (falls forward to the next free one instead
-    of just crashing on bind if it's taken, issue #44) and writes the resolved host/port to a
-    local state file so anything that needs to reach this API later can read it instead of
-    guessing or scanning ports blind.
+    Writes the resolved host/port to a local state file so anything that needs to reach this API
+    later can read it instead of guessing or scanning ports blind (issue #44).
     """
     import uvicorn
 
     settings = get_settings()
-    resolved_port = find_available_port(host, port)
-    if resolved_port != port:
-        typer.echo(f"Port {port} is taken, using {resolved_port} instead")
+    if port is not None:
+        # explicit port: used as requested, never silently swapped for another one. A static
+        # port is usually pinned on purpose (a fixed value other tooling already points at), so
+        # failing loudly here is the correct behavior, not searching around it (issue #45).
+        if not is_port_available(host, port):
+            typer.echo(f"Port {port} is already in use.")
+            raise typer.Exit(code=1)
+        resolved_port = port
+    else:
+        # no port given: this is the only case where auto-discovery applies.
+        resolved_port = find_available_port(host, DEFAULT_API_PORT)
+        typer.echo(f"No port specified, using {resolved_port}")
 
     write_api_state(settings.api_state_file, host=host, port=resolved_port)
     typer.echo(f"Starting autodroid API on http://{host}:{resolved_port} (state: {settings.api_state_file})")

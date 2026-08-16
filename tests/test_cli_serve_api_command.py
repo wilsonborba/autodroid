@@ -76,16 +76,19 @@ def test_serve_api_verifies_the_port_and_writes_then_clears_local_state(tmp_path
     assert not state_file.exists()  # cleaned up once the (fake) server returns
 
 
-def test_serve_api_falls_forward_to_the_next_free_port_when_taken(tmp_path, monkeypatch) -> None:
+def test_serve_api_fails_loudly_when_the_explicit_port_is_taken(tmp_path, monkeypatch) -> None:
+    # an explicit --port is a deliberate, fixed value (other tooling may already point at it),
+    # so it's used as-is or the command fails clearly, it never silently swaps in another port
+    # behind the user's back (issue #45, a correction to #44's first pass)
     state_file = tmp_path / "run" / "api.json"
     held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     held.bind(("127.0.0.1", 0))
     held.listen(1)
     taken_port = held.getsockname()[1]
-    resolved_ports: list[int] = []
+    run_calls: list[int] = []
 
     def fake_run(_app, *, host, port):
-        resolved_ports.append(port)
+        run_calls.append(port)
 
     monkeypatch.setattr(root, "get_settings", lambda: _fake_settings(state_file))
     monkeypatch.setattr("uvicorn.run", fake_run)
@@ -95,7 +98,27 @@ def test_serve_api_falls_forward_to_the_next_free_port_when_taken(tmp_path, monk
     finally:
         held.close()
 
+    assert result.exit_code != 0
+    assert f"Port {taken_port} is already in use." in result.output
+    assert run_calls == []  # never even tried to start
+    assert not state_file.exists()  # nothing written for a port that was never actually used
+
+
+def test_serve_api_auto_discovers_a_port_when_none_is_given(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "run" / "api.json"
+    seen_run_args: dict = {}
+
+    def fake_run(_app, *, host, port):
+        seen_run_args["host"] = host
+        seen_run_args["port"] = port
+
+    monkeypatch.setattr(root, "get_settings", lambda: _fake_settings(state_file))
+    monkeypatch.setattr(root, "DEFAULT_API_PORT", _free_port())
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    result = runner.invoke(app, ["serve-api", "--host", "127.0.0.1"])
+
     assert result.exit_code == 0, result.output
-    assert resolved_ports == [resolved_ports[0]]
-    assert resolved_ports[0] != taken_port
-    assert f"Port {taken_port} is taken, using {resolved_ports[0]} instead" in result.output
+    assert seen_run_args["host"] == "127.0.0.1"
+    assert seen_run_args["port"] == root.DEFAULT_API_PORT
+    assert f"No port specified, using {root.DEFAULT_API_PORT}" in result.output
