@@ -64,7 +64,20 @@ class DispatcherService:
                 session.commit()
                 return {"worker": self.worker_name, "status": "failed", "job_id": job.id, "error": str(exc)}
 
+    def reconcile_orphaned_jobs(self) -> None:
+        """Run exactly once, before the poll loop starts (issue #49): a job left RUNNING by a
+        previous dispatcher process that died mid-job (Ctrl+C, crash) is otherwise invisible to
+        claim_next_job() forever, since it only looks at PENDING/SCHEDULED. Never call this once
+        the loop is already running, a job genuinely in flight in this same process would get
+        wrongly reset out from under itself."""
+        with self.session_factory() as session:
+            queue_service = JobQueueService(session, self.timezone)
+            reconciled = queue_service.reconcile_orphaned_running_jobs()
+            if reconciled:
+                self.logger.warning("Reconciled %s orphaned RUNNING job(s) left by a previous dispatcher", reconciled)
+
     def run_loop(self, iterations: int | None = None) -> None:
+        self.reconcile_orphaned_jobs()
         count = 0
         while iterations is None or count < iterations:
             self.run_once()

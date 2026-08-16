@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Any
 
 from croniter import croniter
@@ -108,6 +108,25 @@ class JobQueueService:
             return job
         return None
 
+    def reconcile_orphaned_running_jobs(self) -> int:
+        """A job left RUNNING when its worker process dies mid-run (Ctrl+C, crash) is orphaned
+        (issue #49): since #46 the claim commits immediately rather than sitting in the same
+        open transaction as the whole job, it survives the process's death, but nothing is
+        actually working on it anymore, and claim_next_job() only ever looks at PENDING/
+        SCHEDULED, so it would otherwise sit stuck forever, invisible to a freshly restarted
+        worker. A dispatcher that just started can't have anything genuinely in flight yet, so
+        every RUNNING job found at that point is safely orphaned. Resets it to SCHEDULED
+        (immediately due) without touching attempt_count again, claim_next_job() already
+        increments that on the next pickup."""
+        stmt = select(Job).where(Job.status == JobStatus.RUNNING)
+        orphaned = list(self.session.scalars(stmt))
+        for job in orphaned:
+            job.status = JobStatus.SCHEDULED
+            job.run_after = utc_now()
+            self.record_event(job.id, "job_orphan_reconciled", "Reset from RUNNING to SCHEDULED: left running by a previous dispatcher that died mid-job", None)
+            self.logger.warning("Job %s was left RUNNING by a previous dispatcher, reset to SCHEDULED", job.id)
+        return len(orphaned)
+
     def mark_completed(self, job_id: int, result: dict[str, Any]) -> Job:
         job = self._require_job(job_id)
         job.status = JobStatus.COMPLETED
@@ -157,7 +176,16 @@ class JobQueueService:
         )
 
     def _is_due(self, job: Job, now: datetime) -> bool:
-        return job.run_after is None or job.run_after <= now
+        # SQLite has no native timezone-aware datetime type: a job.run_after written as UTC-aware
+        # (utc_now(), always this app's own convention) comes back naive once reloaded from
+        # storage in a fresh session/query, crashing a naive-vs-aware comparison against `now`
+        # (issue #49, found by reconcile_orphaned_running_jobs() setting run_after then a later
+        # claim_next_job() call, in a separate session, comparing it). A naive value here always
+        # means UTC, never local time, so it's safe to just attach that.
+        run_after = job.run_after
+        if run_after is not None and run_after.tzinfo is None:
+            run_after = run_after.replace(tzinfo=timezone.utc)
+        return run_after is None or run_after <= now
 
     def _is_within_execution_window(self, job: Job) -> bool:
         if job.execution_window_start is None or job.execution_window_end is None:
