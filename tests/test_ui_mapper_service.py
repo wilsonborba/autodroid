@@ -6,7 +6,7 @@ from sqlalchemy import text
 from lib.core.logs import get_logger
 from lib.dal.local.database import SessionLocal
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
-from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
+from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperScreenCompletionState, MapperSessionStatus
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
 from lib.domain.services.mapper_safety_service import MapperSafetyService
@@ -62,7 +62,7 @@ _TEST_PACKAGE_NAMES = (
     "com.feedscroll.testapp", "com.noscroll.testapp", "com.realcrash.testapp", "com.target.testapp",
     "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
     "com.candidatelog.testapp", "com.replaylog.testapp", "com.remapscreen.testapp",
-    "com.returnverify.testapp", "com.localstate.testapp",
+    "com.returnverify.testapp", "com.localstate.testapp", "com.returnstate.testapp",
 )
 
 
@@ -588,6 +588,7 @@ def test_return_to_screen_persists_successful_system_back_as_a_known_return_edge
         known_return = repository.find_known_return_action(result["session_id"], leaf.id, root.id)
         assert known_return is not None
         assert known_return.action_type == "system_back"
+        assert repository.get_screen_completion_state(leaf.id) == MapperScreenCompletionState.COMPLETE
         transition = repository.find_transition_by_action(known_return.id)
         assert transition is not None
         assert transition.from_screen_id == leaf.id
@@ -611,6 +612,32 @@ def test_return_to_screen_reuses_a_known_in_app_return_action_before_generic_bac
 
     assert service.ui.clicks == ["[9,9][10,10]"]
     assert service.adb.back_calls == 0
+
+
+def test_reset_screen_expanded_resets_completion_state_to_pending() -> None:
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.target.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        screen = repository.create_screen(session_id=mapper_session.id, fingerprint="fp", structural_signature="sig", screen_key="screen", depth=0, ordinal=0, metadata_json={"completion_state": MapperScreenCompletionState.COMPLETE.value})
+        repository.reset_screen_expanded(screen.id)
+        assert repository.get_screen_completion_state(screen.id) == MapperScreenCompletionState.PENDING
+
+
+def test_failed_return_marks_screen_as_resume_needed() -> None:
+    root = [
+        {"text": "A", "content_desc": "", "resource_id": "btn_a", "class_name": "TextView", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": "com.returnstate.testapp"},
+    ]
+    leaf = [{"resource_id": "leaf_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,40][5,45]", "clickable": False, "enabled": True, "package_name": "com.returnstate.testapp"}]
+    wrong_screen = [{"resource_id": "wrong_screen_marker", "text": "", "content_desc": "", "class_name": "TextView", "bounds": "[0,80][5,85]", "clickable": False, "enabled": True, "package_name": "com.returnstate.testapp"}]
+    service = build_service([root, leaf, leaf, wrong_screen])
+
+    result = service.run(MapperRunConfig(package_name="com.returnstate.testapp", mode=MapperMode.LIGHT))
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])
+        leaf_screen = next(screen for screen in screens if screen.depth == 1)
+        assert repository.get_screen_completion_state(leaf_screen.id) == MapperScreenCompletionState.RESUME_NEEDED
 
 
 def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:
@@ -794,7 +821,7 @@ def test_replay_target_logs_why_an_action_is_not_replayable(caplog) -> None:
         repository = SqlAlchemyMapperRepository(session)
         service._replay_target(repository, repository.get_action(action_id))
 
-    assert any("already fully expanded" in record.message for record in caplog.records)
+    assert any("already content-complete" in record.message or "already fully expanded" in record.message for record in caplog.records)
 
 
 class _EventLoggingUi(FakeUi):

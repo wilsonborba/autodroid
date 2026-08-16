@@ -12,7 +12,7 @@ from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.dal.remote.adb_adapter import AdbAdapter
 from lib.dal.remote.uiautomator_adapter import UiAutomatorAdapter
 from lib.domain.models.mapper_model import MapperSession
-from lib.domain.models.mapper_types import MapperActionSafety, MapperLimits, MapperRunConfig, MapperSessionStatus
+from lib.domain.models.mapper_types import MapperActionSafety, MapperLimits, MapperRunConfig, MapperScreenCompletionState, MapperSessionStatus
 from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
@@ -368,7 +368,7 @@ class UiMapperService(MapperEngine):
             screen_key=f"screen-{state['screens_recorded'] + 1}",
             depth=depth,
             ordinal=state["screens_recorded"],
-            metadata_json={"node_count": len(nodes)},
+            metadata_json={"node_count": len(nodes), "navigation_context": structural_signature, "completion_state": MapperScreenCompletionState.PENDING.value},
         )
         state["screens_recorded"] += 1
         node_id_by_key = {}
@@ -402,7 +402,7 @@ class UiMapperService(MapperEngine):
             # this is what stops a profile -> connections -> profile -> connections chain
             # after the second instance instead of after however deep it happens to go (#30)
             self.logger.info("Screen %s is another instance of an already-known structural type, not re-exploring it", screen.id)
-            repository.mark_screen_expanded(screen.id)
+            repository.set_screen_completion_state(screen.id, MapperScreenCompletionState.COMPLETE)
             repository.session.commit()
             return screen.id
 
@@ -520,7 +520,10 @@ class UiMapperService(MapperEngine):
                 self.logger.debug("Scroll %s on screen %s found nothing new (%s/%s consecutive)", screen_scrolls_used, screen.id, consecutive_empty_scrolls, max_consecutive_empty_scrolls)
 
         if depth < max_depth:
-            repository.mark_screen_expanded(screen.id)
+            repository.set_screen_completion_state(
+                screen.id,
+                MapperScreenCompletionState.COMPLETE if screen.depth == 0 else MapperScreenCompletionState.CONTENT_COMPLETE,
+            )
             repository.session.commit()
 
     def _process_candidates(
@@ -742,8 +745,11 @@ class UiMapperService(MapperEngine):
             self.logger.debug("Action %s (%r) not replayable: led nowhere recorded (dead end)", action.id, action.label)
             return None
         destination = repository.get_screen(transition.to_screen_id)
-        if destination is not None and destination.expanded:
+        if destination is not None and repository.get_screen_completion_state(destination.id) == MapperScreenCompletionState.COMPLETE:
             self.logger.debug("Action %s (%r) not replayable: destination screen %s is already fully expanded", action.id, action.label, destination.id)
+            return None
+        if destination is not None and destination.expanded and repository.get_screen_completion_state(destination.id) != MapperScreenCompletionState.RESUME_NEEDED:
+            self.logger.debug("Action %s (%r) not replayable: destination screen %s is already content-complete", action.id, action.label, destination.id)
             return None
         return repository.get_node(action.node_id)
 
@@ -852,11 +858,17 @@ class UiMapperService(MapperEngine):
                     strategy=return_strategy,
                     return_node=return_node,
                 )
+            if current_screen_id is not None:
+                current_state = repository.get_screen_completion_state(current_screen_id)
+                if current_state != MapperScreenCompletionState.RESUME_NEEDED:
+                    repository.set_screen_completion_state(current_screen_id, MapperScreenCompletionState.COMPLETE)
             return
         self.logger.warning(
             "Return-to-screen landed somewhere unexpected (departed=%s), forcing a relaunch and full replay to recover",
             departed,
         )
+        if current_screen_id is not None:
+            repository.set_screen_completion_state(current_screen_id, MapperScreenCompletionState.RESUME_NEEDED)
         self.navigation_context.prepare_fresh_app_launch(package_name)
         self._replay_bounds(ancestor_bounds)
 
