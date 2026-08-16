@@ -9,6 +9,7 @@ from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperScreenCompletionState, MapperSessionStatus
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
+from lib.domain.services.mapper_route_planner_service import DIRECT_PATH, RESTART, ExecutionPlan
 from lib.domain.services.mapper_safety_service import MapperSafetyService
 from lib.domain.services.ui_mapper_service import UiMapperService
 
@@ -63,6 +64,7 @@ _TEST_PACKAGE_NAMES = (
     "com.scrollbudget.testapp", "com.replay.testapp", "com.interleave.testapp",
     "com.candidatelog.testapp", "com.replaylog.testapp", "com.remapscreen.testapp",
     "com.returnverify.testapp", "com.localstate.testapp", "com.returnstate.testapp",
+    "com.recoveryplanner.testapp", "com.recoveryrestart.testapp",
 )
 
 
@@ -638,6 +640,57 @@ def test_failed_return_marks_screen_as_resume_needed() -> None:
         screens = repository.list_screens(result["session_id"])
         leaf_screen = next(screen for screen in screens if screen.depth == 1)
         assert repository.get_screen_completion_state(leaf_screen.id) == MapperScreenCompletionState.RESUME_NEEDED
+
+
+def test_failed_return_uses_direct_route_planner_recovery_before_restart() -> None:
+    package_name = "com.recoveryplanner.testapp"
+    root_dump = [{"text": "Root", "content_desc": "", "resource_id": "root", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    current_dump = [{"text": "Current", "content_desc": "", "resource_id": "current", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    wrong_dump = [{"text": "Wrong", "content_desc": "", "resource_id": "wrong", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    service = build_service([current_dump, wrong_dump, root_dump])
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(root_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(root_dump, package_name), screen_key="root", depth=0, ordinal=0)
+        current = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(current_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(current_dump, package_name), screen_key="current", depth=1, ordinal=1)
+        node = repository.create_node(screen_id=current.id, node_key="recover", text="Recover", bounds="[9,9][10,10]", clickable=True, package_name=package_name)
+        action = repository.create_action(session_id=mapper_session.id, screen_id=current.id, node_id=node.id, action_key="click:recover", action_type="click", label="Recover", safety=MapperActionSafety.SAFE, executed=True, success=True)
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=current.id, action_id=action.id, to_screen_id=root.id, result_type="clicked")
+        session.commit()
+
+        service._return_to_screen(repository, mapper_session.id, package_name, [], departed=False, expected_screen_id=root.id, expected_fingerprint=root.fingerprint)
+
+    assert service.ui.clicks == ["[9,9][10,10]"]
+    assert service.adb.back_calls == 1  # the initial naive back failed, then the planner recovered directly
+    assert service.navigation_context.prepared == []
+
+
+def test_failed_return_can_choose_restart_via_mapper_recovery_planner(monkeypatch) -> None:
+    package_name = "com.recoveryrestart.testapp"
+    root_dump = [{"text": "Root", "content_desc": "", "resource_id": "root", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    current_dump = [{"text": "Current", "content_desc": "", "resource_id": "current", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    wrong_dump = [{"text": "Wrong", "content_desc": "", "resource_id": "wrong", "class_name": "TextView", "bounds": "[0,0][5,5]", "clickable": False, "enabled": True, "package_name": package_name}]
+    service = build_service([current_dump, wrong_dump, root_dump])
+
+    def fake_plan(self, *, session_id: int, current_screen_id: int, target_screen_id: int, restart_option):
+        return ExecutionPlan(strategy_type=RESTART, route=[], route_signature="restart:test", from_screen_id=current_screen_id, to_screen_id=target_screen_id, estimated_duration_ms=1.0, reason="forced_restart")
+
+    monkeypatch.setattr("lib.domain.services.ui_mapper_service.MapperRoutePlannerService.plan", fake_plan)
+    monkeypatch.setattr("lib.domain.services.ui_mapper_service.MapperRoutePlannerService.record_execution", lambda self, plan, *, actual_duration_ms, success: None)
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name=package_name, mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(root_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(root_dump, package_name), screen_key="root", depth=0, ordinal=0)
+        current = repository.create_screen(session_id=mapper_session.id, fingerprint=service.fingerprint_service.fingerprint(current_dump, package_name), structural_signature=service.fingerprint_service.structural_signature(current_dump, package_name), screen_key="current", depth=1, ordinal=1)
+        session.commit()
+
+        service._return_to_screen(repository, mapper_session.id, package_name, [], departed=False, expected_screen_id=root.id, expected_fingerprint=root.fingerprint)
+
+    assert service.ui.clicks == []
+    assert service.adb.back_calls == 1
+    assert service.navigation_context.prepared == [package_name]
 
 
 def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> None:

@@ -16,6 +16,7 @@ from lib.domain.models.mapper_types import MapperActionSafety, MapperLimits, Map
 from lib.domain.services.mapper_engine import MapperEngine
 from lib.domain.services.mapper_fingerprint_service import MapperFingerprintService
 from lib.domain.services.mapper_mode_service import MapperModeService
+from lib.domain.services.mapper_route_planner_service import RESTART, MapperRoutePlannerService, RestartOption
 from lib.domain.services.mapper_safety_service import MapperSafetyService
 from lib.domain.services.navigation_context_service import NavigationContextService
 
@@ -869,8 +870,105 @@ class UiMapperService(MapperEngine):
         )
         if current_screen_id is not None:
             repository.set_screen_completion_state(current_screen_id, MapperScreenCompletionState.RESUME_NEEDED)
+        if current_screen_id is not None and expected_screen_id is not None and self._recover_via_planner(
+            repository, session_id, package_name,
+            current_screen_id=current_screen_id,
+            target_screen_id=expected_screen_id,
+            ancestor_bounds=ancestor_bounds,
+        ):
+            return
         self.navigation_context.prepare_fresh_app_launch(package_name)
         self._replay_bounds(ancestor_bounds)
+
+    def _recover_via_planner(
+        self,
+        repository: SqlAlchemyMapperRepository,
+        session_id: int,
+        package_name: str,
+        *,
+        current_screen_id: int,
+        target_screen_id: int,
+        ancestor_bounds: list[str],
+    ) -> bool:
+        target_screen = repository.get_screen(target_screen_id)
+        if target_screen is None:
+            return False
+        restart_action_ids = [action_id for action_id in self._restart_action_ids(repository, target_screen_id) if action_id is not None]
+        planner = MapperRoutePlannerService(repository.session)
+        plan = planner.plan(
+            session_id=session_id,
+            current_screen_id=current_screen_id,
+            target_screen_id=target_screen_id,
+            restart_option=RestartOption(root_screen_id=self._root_screen_id(repository, target_screen_id), ancestor_step_ids=restart_action_ids),
+        )
+        self.logger.debug(
+            "Mapper recovery planner chose %s (%s) for %s -> %s",
+            plan.strategy_type, plan.reason, current_screen_id, target_screen_id,
+        )
+        started = time.monotonic()
+        success = False
+        if plan.strategy_type == RESTART:
+            self.navigation_context.prepare_fresh_app_launch(package_name)
+            self._replay_bounds(ancestor_bounds)
+            success = True
+        else:
+            success = self._execute_route(repository, plan.route) and self._screen_matches(package_name, target_screen.fingerprint)
+        planner.record_execution(plan, actual_duration_ms=(time.monotonic() - started) * 1000, success=success)
+        return success
+
+    def _execute_route(self, repository: SqlAlchemyMapperRepository, route: list[Any]) -> bool:
+        for transition in route:
+            action = repository.get_action(transition.action_id)
+            if action is None:
+                return False
+            if not self._execute_action(repository, action):
+                return False
+        return True
+
+    def _execute_action(self, repository: SqlAlchemyMapperRepository, action: Any) -> bool:
+        if action.action_type == "system_back":
+            self.adb.press_back()
+            return True
+        metadata = action.metadata_json or {}
+        bounds = metadata.get("bounds")
+        if bounds:
+            return self.ui.click_bounds(bounds)
+        if action.node_id is not None:
+            node = repository.get_node(action.node_id)
+            if node is not None and node.bounds:
+                return self.ui.click_bounds(node.bounds)
+        return False
+
+    def _screen_matches(self, package_name: str, expected_fingerprint: str) -> bool:
+        nodes = self.ui.dump_nodes()
+        if self._left_target_app(nodes, package_name):
+            return False
+        return self.fingerprint_service.fingerprint(nodes, package_name) == expected_fingerprint
+
+    def _restart_action_ids(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> list[int | None]:
+        action_ids: list[int | None] = []
+        current_screen_id = target_screen_id
+        seen_screens: set[int] = set()
+        while current_screen_id not in seen_screens:
+            seen_screens.add(current_screen_id)
+            transition = repository.find_transition_to_screen(current_screen_id)
+            if transition is None:
+                break
+            action_ids.append(transition.action_id)
+            current_screen_id = transition.from_screen_id
+        action_ids.reverse()
+        return action_ids
+
+    def _root_screen_id(self, repository: SqlAlchemyMapperRepository, target_screen_id: int) -> int:
+        current_screen_id = target_screen_id
+        seen_screens: set[int] = set()
+        while current_screen_id not in seen_screens:
+            seen_screens.add(current_screen_id)
+            transition = repository.find_transition_to_screen(current_screen_id)
+            if transition is None:
+                return current_screen_id
+            current_screen_id = transition.from_screen_id
+        return target_screen_id
 
     def _execute_known_return(
         self,
