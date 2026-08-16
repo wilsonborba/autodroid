@@ -30,6 +30,7 @@ class JobResponse(BaseModel):
     adapter_name: str
     status: str
     priority: int
+    payload_json: dict[str, Any] | None
     run_after: datetime | None
     cron_expression: str | None
     cancel_requested: bool
