@@ -547,6 +547,21 @@ class UiMapperService(MapperEngine):
             )
             return screen.id
 
+        canonical_screen = repository.find_screen_by_structural_signature(session_id, structural_signature)
+        if canonical_screen is not None:
+            repository.increment_screen_visit_count(canonical_screen.id)
+            repository.record_screen_observation(canonical_screen.id, fingerprint)
+            state["revisited_screens"] += 1
+            repository.session.commit()
+            if canonical_screen.id in visited_this_pass:
+                return canonical_screen.id
+            visited_this_pass.add(canonical_screen.id)
+            self.logger.info(
+                "Structural screen %s matched canonical screen %s; reusing canonical persistence instead of creating a duplicate screen row",
+                structural_signature[:12], canonical_screen.id,
+            )
+            return canonical_screen.id
+
         screen = repository.create_screen(
             session_id=session_id,
             fingerprint=fingerprint,
@@ -554,7 +569,13 @@ class UiMapperService(MapperEngine):
             screen_key=f"screen-{state['screens_recorded'] + 1}",
             depth=depth,
             ordinal=state["screens_recorded"],
-            metadata_json={"node_count": len(nodes), "navigation_context": structural_signature, "completion_state": MapperScreenCompletionState.PENDING.value},
+            metadata_json={
+                "node_count": len(nodes),
+                "navigation_context": structural_signature,
+                "completion_state": MapperScreenCompletionState.PENDING.value,
+                "observed_fingerprints": [fingerprint],
+                "observation_count": 1,
+            },
         )
         state["screens_recorded"] += 1
         node_id_by_key = {}

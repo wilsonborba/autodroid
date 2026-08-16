@@ -770,16 +770,30 @@ def test_second_instance_of_a_structural_type_is_deduped_not_re_explored() -> No
 
     result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.MEDIUM))
 
-    assert result["screens_recorded"] == 5  # root, Alice, her header's destination, Connections, Bob
+    assert result["screens_recorded"] == 4  # root, Alice, her header's destination, Connections; Bob reuses Alice's canonical screen
     assert service.ui.clicks.count("[0,20][100,30]") == 1  # Connections: tried once (Alice), not for Bob
 
     with SessionLocal() as session:
         repository = SqlAlchemyMapperRepository(session)
-        screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, header_dest, connections, Bob
-        bob_screen = screens[4]
-        assert bob_screen.expanded is True  # deduped screens still end up expanded=True
-        forward_actions = [action for action in repository.list_actions(result["session_id"], screen_id=bob_screen.id) if not action.action_key.startswith("return:")]
-        assert forward_actions == []  # never got its own candidates tried
+        screens = repository.list_screens(result["session_id"])  # ordered: root, Alice, header_dest, connections
+        alice_screen = screens[1]
+        assert alice_screen.expanded is True
+        assert alice_screen.metadata_json["observation_count"] == 2
+        assert len(alice_screen.metadata_json["observed_fingerprints"]) == 2
+
+
+def test_structural_revisit_reuses_canonical_screen_row() -> None:
+    service = build_service([ROOT_TWO_PROFILES, _profile_dump("Alice"), ROOT_TWO_PROFILES, _profile_dump("Bob")])
+
+    result = service.run(MapperRunConfig(package_name="com.target.testapp", mode=MapperMode.LIGHT))
+
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        screens = repository.list_screens(result["session_id"])
+        assert len(screens) == 2
+        canonical_profile = screens[1]
+        assert canonical_profile.metadata_json["observation_count"] == 2
+        assert len(canonical_profile.metadata_json["observed_fingerprints"]) == 2
 
 
 def _fixed_content_dump(section_text: str) -> list[dict]:
