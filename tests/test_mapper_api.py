@@ -361,7 +361,7 @@ class FakeOnDemandMapperService:
             "node_count": 12,
         }
 
-    def act(self, package_name: str, *, session_id: int | None = None, action_id: int | None = None, bounds: str | None = None, action_type: str = "click"):
+    def act(self, package_name: str, *, session_id: int | None = None, action_id: int | None = None, bounds: str | None = None, action_type: str = "click", text: str | None = None, clear: bool = False, duration: float | None = None):
         return {
             "session_id": session_id or 77,
             "source_screen_id": 7,

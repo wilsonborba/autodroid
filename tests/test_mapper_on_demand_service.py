@@ -31,11 +31,23 @@ def _clean_on_demand_sessions() -> None:
 class FakeUi:
     def __init__(self, dumps: list[list[dict]]) -> None:
         self.dumps = list(dumps)
+        self.clicked_bounds: list[str] = []
+        self.long_clicked_bounds: list[tuple[str, float | None]] = []
+        self.typed_text: list[tuple[str, bool]] = []
 
     def dump_nodes(self):
         return self.dumps.pop(0) if self.dumps else []
 
     def click_bounds(self, bounds: str) -> bool:
+        self.clicked_bounds.append(bounds)
+        return True
+
+    def long_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        self.long_clicked_bounds.append((bounds, duration))
+        return True
+
+    def type_text(self, text: str, *, clear: bool = False) -> bool:
+        self.typed_text.append((text, clear))
         return True
 
 
@@ -79,3 +91,33 @@ def test_inspect_marks_unknown_then_known_screen() -> None:
     assert first["recognized"] is False
     assert second["recognized"] is True
     assert len(second["candidates"]) >= 1
+
+
+def test_act_type_text_types_into_focused_field() -> None:
+    # issue #61: type_text has no bounds to act on, it types into whatever's already focused
+    # (same contract as everywhere else this action type exists), the mapper on-demand act()
+    # used to only know how to click/back
+    nodes = [{"text": "Message", "content_desc": "", "resource_id": "composer", "class_name": "EditText", "bounds": "[0,0][10,10]", "clickable": True, "enabled": True, "package_name": PACKAGE_NAME}]
+    service = MapperOnDemandService(load_settings())
+    service.mapper = _build_mapper([nodes, nodes, nodes])
+
+    inspected = service.inspect(PACKAGE_NAME)
+    result = service.act(PACKAGE_NAME, session_id=inspected["session_id"], action_type="type_text", text="hello")
+
+    assert result["success"] is True
+    assert service.mapper.ui.typed_text == [("hello", False)]
+
+
+def test_act_long_click_bounds_long_presses() -> None:
+    # issue #61: a touchscreen's equivalent of a right-click (context menus, e.g. the "Reply"
+    # option on a shared reel inside a DM), needed on-demand the same way it already exists for
+    # a saved Flow's steps
+    nodes = [{"text": "Card", "content_desc": "", "resource_id": "card", "class_name": "View", "bounds": "[0,0][10,10]", "clickable": False, "enabled": True, "package_name": PACKAGE_NAME}]
+    service = MapperOnDemandService(load_settings())
+    service.mapper = _build_mapper([nodes, nodes, nodes])
+
+    inspected = service.inspect(PACKAGE_NAME)
+    result = service.act(PACKAGE_NAME, session_id=inspected["session_id"], action_type="long_click_bounds", bounds="[0,0][10,10]", duration=1.2)
+
+    assert result["success"] is True
+    assert service.mapper.ui.long_clicked_bounds == [("[0,0][10,10]", 1.2)]

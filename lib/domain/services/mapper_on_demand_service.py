@@ -64,6 +64,9 @@ class MapperOnDemandService:
         action_id: int | None = None,
         bounds: str | None = None,
         action_type: str = "click",
+        text: str | None = None,
+        clear: bool = False,
+        duration: float | None = None,
     ) -> dict[str, Any]:
         with session_scope() as session:
             repository = SqlAlchemyMapperRepository(session)
@@ -80,8 +83,15 @@ class MapperOnDemandService:
                     node = repository.get_node(action.node_id)
                     click_bounds = None if node is None else node.bounds
             if action is None:
-                inferred_action_type = "system_back" if action_type == "back" else "click"
-                action_key = f"on_demand:{action_type}:{click_bounds or 'back'}"
+                # persisted action_type mirrors what actually ran (issue #61): it used to be
+                # hardcoded to "click" for anything that wasn't "back", which was harmless while
+                # click/back were the only two options, but would have mislabeled long_click_bounds
+                # and type_text now that they exist too
+                inferred_action_type = "system_back" if action_type == "back" else action_type
+                # type_text has no bounds to key on (it types into whatever's already focused, same
+                # as everywhere else this action type is used), key on the text itself instead
+                action_key_target = click_bounds or (text if action_type == "type_text" else "back")
+                action_key = f"on_demand:{action_type}:{action_key_target}"
                 action = repository.find_action_by_key(mapper_session.id, source_screen.id, action_key)
                 if action is None:
                     action = repository.create_action(
@@ -98,6 +108,14 @@ class MapperOnDemandService:
             if action_type == "back" or action.action_type == "system_back":
                 self.mapper.adb.press_back()
                 success = True
+            elif action_type == "type_text" or action.action_type == "type_text":
+                if not text:
+                    raise ValueError("type_text action requires text")
+                success = self.mapper.ui.type_text(text, clear=clear)
+            elif action_type == "long_click_bounds" or action.action_type == "long_click_bounds":
+                if not click_bounds:
+                    raise ValueError("long_click_bounds action requires bounds or a mapped action with bounds")
+                success = self.mapper.ui.long_click_bounds(click_bounds, duration)
             else:
                 if not click_bounds:
                     raise ValueError("click action requires bounds or a mapped action with bounds")

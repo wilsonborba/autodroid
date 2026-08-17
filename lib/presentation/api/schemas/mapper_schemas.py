@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MapperRunRequest(BaseModel):
@@ -370,7 +370,10 @@ class MapperOnDemandActionRequest(BaseModel):
     session_id: int | None = None
     action_id: int | None = None
     bounds: str | None = None
-    action_type: str = "click"
+    action_type: str = Field(default="click", description="One of click, long_click_bounds, type_text, back. click/long_click_bounds act on `bounds`; type_text ignores it and types into whatever's already focused.")
+    text: str | None = Field(default=None, description="type_text only: the text to type into the currently focused field.")
+    clear: bool = Field(default=False, description="type_text only: clear the field before typing.")
+    duration: float | None = Field(default=None, description="long_click_bounds only: press duration in seconds, defaults to the adapter's own default (0.8s) when omitted.")
 
 
 class MapperOnDemandActionResponse(BaseModel):
