@@ -19,7 +19,9 @@ from alembic.config import Config  # noqa: E402
 
 from lib.dal.local.database import engine  # noqa: E402
 
-ALEMBIC_INI_PATH = "lib/dal/alembic.ini"
+# absolute, not relative to cwd: pytest can be invoked from anywhere, same class of bug fixed for
+# the autodroid CLI's own `db` commands (lib/presentation/cli/commands/root.py).
+ALEMBIC_INI_PATH = str(_TEST_DB_PATH.parent.parent / "alembic.ini")
 
 
 def pytest_configure(config) -> None:
