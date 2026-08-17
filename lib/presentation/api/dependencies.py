@@ -37,3 +37,10 @@ from lib.domain.services.mapper_on_demand_service import MapperOnDemandService
 
 def get_mapper_on_demand_service() -> MapperOnDemandService:
     return MapperOnDemandService(get_settings())
+
+
+from lib.domain.services.android_sources_service import AndroidSourcesService
+
+
+def get_android_sources_service() -> AndroidSourcesService:
+    return AndroidSourcesService(get_settings())

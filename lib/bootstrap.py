@@ -14,6 +14,7 @@ from lib.domain.services.dispatcher_service import DispatcherService
 from lib.domain.services.local_mapper_export_service import LocalMapperExportService
 from lib.domain.services.mapper_remap_task import MapperRemapTask
 from lib.presentation.api.middleware import RequestLoggingMiddleware
+from lib.presentation.api.routes.android_sources import router as android_sources_router
 from lib.presentation.api.routes.device_actions import router as device_actions_router
 from lib.presentation.api.routes.jobs import router as jobs_router
 from lib.presentation.api.routes.logs_stream import router as logs_stream_router
@@ -100,6 +101,13 @@ API_TAGS = [
         "Use this when the next action depends on what a previous call returned.",
     },
     {
+        "name": "android-sources",
+        "description": "CRUD over the files an app can see on the emulator: its own private "
+        "data, its own external storage folder, and shared staging folders (Download, Pictures, "
+        "DCIM/Camera) a human would normally drop a file into before the app's own upload flow "
+        "picks it up. Read is always available; write/delete require --allow-dangerous-actions.",
+    },
+    {
         "name": "jobs",
         "description": "The background job queue and its single worker: schedule, list, cancel, "
         "and reprioritize queued work; check what the worker is currently doing.",
@@ -123,6 +131,7 @@ def create_api_app() -> FastAPI:
     app.include_router(mapper_router)
     app.include_router(mapper_flows_router)
     app.include_router(device_actions_router)
+    app.include_router(android_sources_router)
     app.include_router(logs_stream_router)
 
     @app.get("/docs", include_in_schema=False, response_class=HTMLResponse)
