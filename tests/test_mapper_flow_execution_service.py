@@ -81,6 +81,8 @@ class FakeUi:
         self.screenshots: list[str] = []
         self.clicked_bounds: list[str] = []
         self.click_bounds_result = True
+        self.clicked_resource_ids: list[str] = []
+        self.click_by_resource_id_result = True
         self.typed_text: list[tuple[str, bool]] = []
         self.type_text_result = True
         # dumps are consumed one per call; once exhausted, the last one repeats (simulates the
@@ -90,6 +92,10 @@ class FakeUi:
     def click_first_by_text_or_description(self, *candidates: str) -> bool:
         self.clicked_exact.append(candidates)
         return self.exact_result
+
+    def click_by_resource_id(self, resource_id: str) -> bool:
+        self.clicked_resource_ids.append(resource_id)
+        return self.click_by_resource_id_result
 
     def click_first_by_text_or_description_contains(self, *candidates: str) -> bool:
         self.clicked_contains.append(candidates)
@@ -210,6 +216,31 @@ def test_click_step_executes_and_reports_success() -> None:
 
     assert result["success"] is True
     assert service.ui.clicked_exact == [("Profile", "Perfil")]
+
+
+def test_click_step_prefers_resource_id_over_text_candidates() -> None:
+    # issue #60: resource_id is stable across targets whose visible text is dynamic (a DM reply
+    # bar showing "Reply to <contact>"), so it must be tried before falling back to text
+    service = build_service()
+    step = make_step(action_type="click", selector_json={"resource_id": "com.instagram.android:id/reply_bar_edittext", "candidates": ["Reply to Rafael Alexandre ...."]})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.clicked_resource_ids == ["com.instagram.android:id/reply_bar_edittext"]
+    assert service.ui.clicked_exact == []
+
+
+def test_click_step_falls_back_to_text_when_resource_id_click_fails() -> None:
+    service = build_service()
+    service.ui.click_by_resource_id_result = False
+    step = make_step(action_type="click", selector_json={"resource_id": "stale_id", "candidates": ["Profile"]})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.clicked_resource_ids == ["stale_id"]
+    assert service.ui.clicked_exact == [("Profile",)]
 
 
 def test_click_bounds_step_clicks_the_exact_region() -> None:

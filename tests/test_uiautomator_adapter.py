@@ -20,6 +20,34 @@ def _adapter(device: FakeDevice) -> UiAutomatorAdapter:
     return adapter
 
 
+class FakeSelector:
+    def __init__(self, *, found: bool) -> None:
+        self._found = found
+        self.clicked = False
+
+    def exists(self, timeout: float = 1) -> bool:
+        return self._found
+
+    def click(self) -> None:
+        self.clicked = True
+
+
+class FakeResourceIdDevice:
+    """Mimics the subset of uiautomator2's `device(**kwargs)` selector API that
+    `click_by_resource_id` uses: calling the device with a selector kwarg returns an object with
+    `exists()`/`click()`, same shape used by `click_first_by_text_or_description`."""
+
+    def __init__(self, *, found: bool) -> None:
+        self.calls: list[dict] = []
+        self._found = found
+        self.selector: FakeSelector | None = None
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        self.selector = FakeSelector(found=self._found)
+        return self.selector
+
+
 def test_type_text_sends_keys_to_the_focused_field() -> None:
     device = FakeDevice()
     adapter = _adapter(device)
@@ -47,3 +75,24 @@ def test_type_text_returns_false_instead_of_raising_on_device_failure() -> None:
     result = adapter.type_text("hello")
 
     assert result is False
+
+
+def test_click_by_resource_id_clicks_when_the_element_exists() -> None:
+    device = FakeResourceIdDevice(found=True)
+    adapter = _adapter(device)
+
+    result = adapter.click_by_resource_id("com.instagram.android:id/reply_bar_edittext")
+
+    assert result is True
+    assert device.calls == [{"resourceId": "com.instagram.android:id/reply_bar_edittext"}]
+    assert device.selector.clicked is True
+
+
+def test_click_by_resource_id_returns_false_when_not_found() -> None:
+    device = FakeResourceIdDevice(found=False)
+    adapter = _adapter(device)
+
+    result = adapter.click_by_resource_id("missing_id")
+
+    assert result is False
+    assert device.selector.clicked is False

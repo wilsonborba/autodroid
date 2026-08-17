@@ -64,6 +64,21 @@ class UiAutomatorAdapter:
                         return True
         return False
 
+    def click_by_resource_id(self, resource_id: str) -> bool:
+        # resource_id is the stable identifier apps expose for a UI element (issue #18's own
+        # spec called it out as the resilient option, ahead of text/content_desc): a compose bar
+        # or an action button keeps the same resource_id across runs even when the text on it is
+        # dynamic (e.g. Instagram's reply field shows "Reply to <contact>", the contact changes,
+        # the resource_id "reply_bar_edittext" doesn't). Only safe for elements that are unique
+        # on screen; a resource_id shared by every row of a list still needs text/position to
+        # pick one specific row.
+        selector = self.device(resourceId=resource_id)
+        if selector.exists(timeout=1):
+            selector.click()
+            time.sleep(1)
+            return True
+        return False
+
     def dump_nodes(self) -> list[dict[str, Any]]:
         self.logger.debug("Dumping UI hierarchy")
         hierarchy = self.device.dump_hierarchy(compressed=False)

@@ -394,7 +394,17 @@ class MapperFlowExecutionService:
         return ""
 
     def _execute_click(self, step: MapperFlowStep) -> dict[str, Any]:
-        candidates = (step.selector_json or {}).get("candidates") or []
+        # resource_id first when the mapped node had one (issue #18's own spec called it the
+        # resilient option): it survives across targets whose visible text is dynamic (a DM
+        # reply bar showing "Reply to <contact>", a comment field showing "Add a comment for
+        # <author>"), where the text itself never repeats from one run to the next. Falls back to
+        # text/content_desc candidates when there's no resource_id, or the resource_id didn't
+        # match anything (app update, or a resource_id that isn't actually unique on this screen).
+        selector = step.selector_json or {}
+        resource_id = selector.get("resource_id")
+        if resource_id and self.ui.click_by_resource_id(resource_id):
+            return {"success": True}
+        candidates = selector.get("candidates") or []
         return {"success": self.ui.click_first_by_text_or_description(*candidates)}
 
     def _execute_click_first_match(self, step: MapperFlowStep) -> dict[str, Any]:

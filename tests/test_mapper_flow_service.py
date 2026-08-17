@@ -221,3 +221,33 @@ def test_update_and_remove_step_via_service() -> None:
         assert len(steps) == 1
         # the step definition itself still exists (removed from this flow only, not deleted)
         assert flow_repository.get_step(step_id) is not None
+
+
+def test_get_or_create_step_prefers_resource_id_with_text_fallback() -> None:
+    # issue #60: a node's resource_id is stable across targets whose visible text is dynamic (a
+    # DM reply bar showing "Reply to <contact>"), the generated step selector must carry both,
+    # not just the text that was visible at mapping time
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.instagram.android", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=1, max_actions=8, max_scrolls=0)
+        screen_root = repository.create_screen(session_id=mapper_session.id, fingerprint="root", screen_key="root", depth=0, ordinal=0)
+        screen_thread = repository.create_screen(session_id=mapper_session.id, fingerprint="thread", screen_key="thread", depth=1, ordinal=1)
+        node = repository.create_node(
+            screen_id=screen_root.id, node_key="node-reply", text="Reply to Rafael Alexandre ....",
+            resource_id="com.instagram.android:id/reply_bar_edittext", clickable=True,
+        )
+        action = repository.create_action(
+            session_id=mapper_session.id, screen_id=screen_root.id, node_id=node.id,
+            action_key="click:reply", action_type="click", label="Reply to Rafael Alexandre ....", safety=MapperActionSafety.SAFE,
+        )
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=screen_root.id, action_id=action.id, to_screen_id=screen_thread.id, result_type="clicked")
+        session.commit()
+        action_id = action.id
+
+    with SessionLocal() as session:
+        step = MapperFlowService(session).get_or_create_step_for_action("com.instagram.android", action_id)
+
+        assert step.selector_json == {
+            "resource_id": "com.instagram.android:id/reply_bar_edittext",
+            "candidates": ["Reply to Rafael Alexandre ...."],
+        }

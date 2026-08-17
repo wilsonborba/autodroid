@@ -189,13 +189,19 @@ class MapperFlowService:
             raise ValueError(f"Mapper action {transition.action_id} not found")
         node = self.mapper_repository.get_node(action.node_id) if action.node_id else None
 
+        # resource_id first, text as a safety net (issue #60): resource_id is the stable
+        # identifier an app exposes for an element, it survives across targets whose visible text
+        # is dynamic (a DM reply bar showing "Reply to <contact>", a comment field showing "Add a
+        # comment for <author>"); the literal text/content_desc seen at mapping time never repeats
+        # for those. Kept alongside resource_id, not replaced by it, since resource_id alone is
+        # ambiguous for a row shared by several list items, and any of the app removing the
+        # resource_id later, needs the text fallback to still resolve.
         label = action.label or (node.text if node else None) or (node.content_desc if node else None)
+        selector: dict[str, Any] = {}
+        if node is not None and node.resource_id:
+            selector["resource_id"] = node.resource_id
         if label:
-            selector = {"candidates": [label]}
-        elif node is not None and node.resource_id:
-            selector = {"resource_id": node.resource_id}
-        else:
-            selector = {}
+            selector["candidates"] = [label]
 
         return self.flow_repository.create_step(
             package_name=package_name,
