@@ -368,12 +368,29 @@ class MapperOnDemandInspectResponse(BaseModel):
 class MapperOnDemandActionRequest(BaseModel):
     package_name: str
     session_id: int | None = None
-    action_id: int | None = None
-    bounds: str | None = None
-    action_type: str = Field(default="click", description="One of click, long_click_bounds, type_text, back. click/long_click_bounds act on `bounds`; type_text ignores it and types into whatever's already focused.")
-    text: str | None = Field(default=None, description="type_text only: the text to type into the currently focused field.")
-    clear: bool = Field(default=False, description="type_text only: clear the field before typing.")
-    duration: float | None = Field(default=None, description="long_click_bounds only: press duration in seconds, defaults to the adapter's own default (0.8s) when omitted.")
+    action_id: int | None = Field(default=None, description="A MapperAction id from GET /mapper/on-demand/inspect's candidates. When given, action_type/selector/params are ignored, resolved from the mapped action instead.")
+    action_type: str = Field(
+        default="click",
+        description="Same action_type vocabulary as POST /device/actions and a MapperFlowStep, "
+        "runs through the identical dispatch: click, click_first_match, click_bounds, "
+        "long_click_bounds, double_click_bounds, drag_bounds, pinch, swipe_bounds, swipe_up, "
+        "swipe_down, scroll_up, scroll_down, type_text, clipboard_set, clipboard_get, "
+        "press_hold_start, press_hold_release, back, home, enter, keyevent, wait, dump_nodes, "
+        "screenshot, ocr_extract.",
+    )
+    selector: dict[str, Any] | None = Field(
+        default=None,
+        description="Shape depends on action_type, identical to POST /device/actions: click wants "
+        "{\"candidates\": [str, ...]}, click_bounds/long_click_bounds/double_click_bounds/"
+        "press_hold_start/press_hold_release want {\"bounds\": \"[x1,y1][x2,y2]\"} (long/double "
+        "click also accept an optional \"duration\"), drag_bounds wants {\"from_bounds\": ..., "
+        "\"to_bounds\": ..., \"duration\": float}, pinch wants {\"resource_id\": ..., \"direction\": "
+        "\"in\"|\"out\", \"percent\": int, \"steps\": int}, swipe_bounds wants {\"bounds\": ..., "
+        "\"direction\": \"left\"|\"right\"|\"up\"|\"down\", \"distance\": int}, type_text/clipboard_set "
+        "want {\"text\": str} (type_text also takes \"clear\": bool), keyevent wants {\"keycode\": "
+        "str}, the rest ignore this field.",
+    )
+    params: dict[str, Any] | None = Field(default=None, description="wait wants {\"seconds\": float}; screenshot/ocr_extract accept {\"filename\": str}.")
 
 
 class MapperOnDemandActionResponse(BaseModel):
@@ -383,3 +400,8 @@ class MapperOnDemandActionResponse(BaseModel):
     action_id: int
     success: bool
     result_type: str
+    node_count: int | None = Field(default=None, description="Set by dump_nodes: how many nodes were on screen.")
+    nodes: list[dict[str, Any]] | None = Field(default=None, description="Set by dump_nodes: the live accessibility tree.")
+    screenshot_path: str | None = Field(default=None, description="Set by screenshot: where the image was saved.")
+    ocr_regions: list[dict[str, str]] | None = Field(default=None, description="Set by ocr_extract: one {\"text\": ..., \"bounds\": ...} per detected region.")
+    clipboard_text: str | None = Field(default=None, description="Set by clipboard_get: the device clipboard's current text.")

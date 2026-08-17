@@ -25,23 +25,48 @@ previous call returned.
    chain of steps from the root. You never need to compute this path yourself.
 
 2. **A raw action** (`action_type`, one of `click`, `click_first_match`, `click_bounds`,
-   `type_text`, `scroll_up`, `scroll_down`, `back`, `home`, `enter`, `keyevent`, `wait`,
-   `dump_nodes`, `screenshot`, `ocr_extract`): runs
-   against whatever is currently on screen. Pass `target_screen_id` (a `MapperScreen` id) to also
-   get navigated there first, the same way as a mapped action; without it, nothing is navigated,
-   this fires immediately against the live screen, useful right after a previous call already
-   confirmed the position (via its `resulting_screen_id`), or for a purely exploratory read.
+   `long_click_bounds`, `double_click_bounds`, `drag_bounds`, `pinch`, `swipe_bounds`, `type_text`,
+   `clipboard_set`, `clipboard_get`, `press_hold_start`, `press_hold_release`, `swipe_up`,
+   `swipe_down`, `scroll_up`, `scroll_down`, `back`, `home`, `enter`, `keyevent`, `wait`,
+   `dump_nodes`, `screenshot`, `ocr_extract`): runs against whatever is currently on screen. Pass `target_screen_id` (a
+   `MapperScreen` id) to also get navigated there first, the same way as a mapped action; without
+   it, nothing is navigated, this fires immediately against the live screen, useful right after a
+   previous call already confirmed the position (via its `resulting_screen_id`), or for a purely
+   exploratory read.
+
+`swipe_up`/`swipe_down` are raw finger gestures. `scroll_down` means "show me lower content"
+(implemented as a bottom-to-top finger swipe, which avoids the common ambiguity around pull-to-
+refresh), and `scroll_up` means "show me earlier content" (implemented as a top-to-bottom finger
+swipe).
+
+Android has no left/right mouse button, so `long_click_bounds` (press-and-hold) and `swipe_bounds`
+(a directional drag) are its equivalent of a right-click: gestures anchored to one exact element
+instead of the whole screen, for interactions an app only recognizes when they start on a specific
+node, e.g. long-pressing a chat message to open its context menu (reply, forward, pin, delete,
+...), or swiping a message sideways to reveal its reply action directly. Follow either with
+`dump_nodes` to see what appeared, then `click`/`click_bounds` on whichever option showed up.
 
 `selector`/`params` shape depends on `action_type`, mirroring MapperFlowStep: `click` takes
-`{"candidates": [str, ...]}` (matched by visible text or content description); `click_bounds`
-takes `{"bounds": "[x1,y1][x2,y2]"}` (an exact screen region, e.g. from a prior `dump_nodes` or
+`{"candidates": [str, ...]}` (matched by visible text or content description); `click_bounds`,
+`long_click_bounds`, `double_click_bounds`, `press_hold_start`, `press_hold_release` take
+`{"bounds": "[x1,y1][x2,y2]"}` (an exact screen region, e.g. from a prior `dump_nodes` or
 `ocr_extract` result, useful too for anything the accessibility tree marks as non-clickable even
-though it visually reacts to a tap, some apps do this for their own icon rows); `type_text` takes
-`{"text": str, "clear": bool}` (types into whatever is currently focused, so a `click`/
-`click_bounds` on the field comes first as its own step; `clear` wipes existing content before
-typing); `keyevent` takes `{"keycode": str}` such as `KEYCODE_ENTER`; `enter` is a shortcut
-for the most common submit action; `wait` takes `params: {"seconds": float}`; the rest need no
-selector.
+though it visually reacts to a tap, some apps do this for their own icon rows; `long_click_bounds`
+and `double_click_bounds` also accept an optional `"duration"` in seconds); `drag_bounds` (press,
+move, release on a different target, distinct from `swipe_bounds` which only has a direction and
+no drop target) takes `{"from_bounds": ..., "to_bounds": ..., "duration": float}`; `pinch` (zoom,
+only exists on a selected widget, no raw-coordinate variant) takes `{"resource_id": str,
+"direction": "in"|"out", "percent": int, "steps": int}`; `swipe_bounds` takes `{"bounds":
+"[x1,y1][x2,y2]", "direction": "left"|"right"|"up"|"down", "distance": int}` (`distance` in
+pixels, optional, defaults to the element's own size along that axis capped between 150 and 400);
+`type_text`/`clipboard_set` take `{"text": str}` (`type_text` also takes `"clear": bool`, types
+into whatever is currently focused, so a `click`/`click_bounds` on the field comes first as its
+own step; `clipboard_set` writes the device clipboard instead, pair with a later "Paste" click);
+`clipboard_get` returns the clipboard's current text, no selector needed; `press_hold_start` and
+`press_hold_release` are the two halves of a caller-timed hold (recording a voice message: start,
+wait for whatever condition, release), unlike `long_click_bounds`'s fixed duration; `keyevent`
+takes `{"keycode": str}` such as `KEYCODE_ENTER`; `enter` is a shortcut for the most common submit
+action; `wait` takes `params: {"seconds": float}`; the rest need no selector.
 
 **Response**: `success` tells whether the action itself worked. `resulting_screen_id` is the new
 known position when knowable (a mapped action's destination, or a read-only action like
@@ -52,7 +77,8 @@ screen again to check. `nodes` (from `dump_nodes`) is the live accessibility tre
 and `scrollable`, everything needed to decide the next action. `ocr_regions` (from `ocr_extract`,
 requires an earlier `screenshot` call in the same `params.filename`) is `[{"text": ..., "bounds":
 ...}, ...]`; OCR only reports what it read, it never judges whether a result is meaningful or
-actionable, that call belongs to you.
+actionable, that call belongs to you. `clipboard_text` (from `clipboard_get`) is the device
+clipboard's current text.
 
 **Errors**: a mapped action that was never actually clicked while mapping, or a `target_screen_id`
 that doesn't exist in the map, returns 400 immediately, there's nothing to navigate to.

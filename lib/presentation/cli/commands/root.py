@@ -361,8 +361,11 @@ def inspect_mapper_screen(package_name: str, session_id: int | None = None, as_j
 
 
 @mapper_app.command("act")
-def act_mapper_on_demand(package_name: str, session_id: int | None = None, action_id: int | None = None, bounds: str | None = None, action_type: str = "click", as_json: bool = False) -> None:
-    payload = MapperOnDemandService(get_settings()).act(package_name, session_id=session_id, action_id=action_id, bounds=bounds, action_type=action_type)
+def act_mapper_on_demand(package_name: str, session_id: int | None = None, action_id: int | None = None, action_type: str = "click", selector: str = "{}", params: str | None = None, as_json: bool = False) -> None:
+    payload = MapperOnDemandService(get_settings()).act(
+        package_name, session_id=session_id, action_id=action_id, action_type=action_type,
+        selector=json.loads(selector), params=json.loads(params) if params else None,
+    )
     if as_json:
         typer.echo(JsonOutput.render(payload))
         return

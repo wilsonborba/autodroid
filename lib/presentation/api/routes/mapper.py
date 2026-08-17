@@ -103,11 +103,9 @@ def execute_on_demand_mapper_action(payload: MapperOnDemandActionRequest):
             payload.package_name,
             session_id=payload.session_id,
             action_id=payload.action_id,
-            bounds=payload.bounds,
             action_type=payload.action_type,
-            text=payload.text,
-            clear=payload.clear,
-            duration=payload.duration,
+            selector=payload.selector,
+            params=payload.params,
         ))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

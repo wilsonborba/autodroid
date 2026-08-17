@@ -52,6 +52,14 @@ class MapperFlowExecutionService:
             "click_first_match": self._execute_click_first_match,
             "click_bounds": self._execute_click_bounds,
             "type_text": self._execute_type_text,
+            "long_click_bounds": self._execute_long_click_bounds,
+            "double_click_bounds": self._execute_double_click_bounds,
+            "drag_bounds": self._execute_drag_bounds,
+            "pinch": self._execute_pinch,
+            "clipboard_set": self._execute_clipboard_set,
+            "clipboard_get": self._execute_clipboard_get,
+            "press_hold_start": self._execute_press_hold_start,
+            "press_hold_release": self._execute_press_hold_release,
             "scroll_up": self._execute_scroll_up,
             "scroll_down": self._execute_scroll_down,
             "back": self._execute_back,
@@ -427,6 +435,70 @@ class MapperFlowExecutionService:
         if not bounds:
             return {"success": False}
         return {"success": self.ui.click_bounds(bounds)}
+
+    def _execute_long_click_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # press-and-hold on an exact region: a touchscreen's equivalent of a right-click, the
+        # gesture most apps use to surface a contextual menu (reply, forward, pin, delete, ...)
+        # on an element instead of activating it
+        bounds = (step.selector_json or {}).get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.long_click_bounds(bounds, (step.selector_json or {}).get("duration"))}
+
+    def _execute_double_click_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # two quick taps at the same point (issue #62): the "like" gesture in most social apps
+        selector = step.selector_json or {}
+        bounds = selector.get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.double_click_bounds(bounds, selector.get("duration"))}
+
+    def _execute_drag_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # press on one element, move, release on another (issue #62): has an actual drop target,
+        # unlike swipe_bounds which only has a direction and a distance
+        selector = step.selector_json or {}
+        from_bounds = selector.get("from_bounds")
+        to_bounds = selector.get("to_bounds")
+        if not from_bounds or not to_bounds:
+            return {"success": False}
+        return {"success": self.ui.drag_bounds(from_bounds, to_bounds, selector.get("duration"))}
+
+    def _execute_pinch(self, step: MapperFlowStep) -> dict[str, Any]:
+        # zoom in/out (issue #62): only exists on a selected widget (resource_id), uiautomator2
+        # has no raw-coordinate two-finger primitive, so there's no bounds variant of this one
+        selector = step.selector_json or {}
+        resource_id = selector.get("resource_id")
+        direction = selector.get("direction")
+        if not resource_id or not direction:
+            return {"success": False}
+        return {"success": self.ui.pinch_by_resource_id(resource_id, direction=direction, percent=selector.get("percent", 100), steps=selector.get("steps", 50))}
+
+    def _execute_clipboard_set(self, step: MapperFlowStep) -> dict[str, Any]:
+        # writes the clipboard so a later step can paste it, e.g. long-press a field then tap
+        # "Paste" (issue #62): the other half of type_text, which always simulates keystrokes
+        text = (step.selector_json or {}).get("text")
+        if not text:
+            return {"success": False}
+        return {"success": self.ui.set_clipboard(text)}
+
+    def _execute_clipboard_get(self, step: MapperFlowStep) -> dict[str, Any]:
+        return {"success": True, "clipboard_text": self.ui.get_clipboard()}
+
+    def _execute_press_hold_start(self, step: MapperFlowStep) -> dict[str, Any]:
+        # first half of a caller-controlled press-and-release (issue #62): for holding until some
+        # other condition is met (recording a voice message) instead of a fixed duration like
+        # long_click_bounds; the caller is responsible for eventually running press_hold_release
+        # at the same bounds, nothing here starts a timer
+        bounds = (step.selector_json or {}).get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.press_hold_start(bounds)}
+
+    def _execute_press_hold_release(self, step: MapperFlowStep) -> dict[str, Any]:
+        bounds = (step.selector_json or {}).get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.press_hold_release(bounds)}
 
     def _execute_type_text(self, step: MapperFlowStep) -> dict[str, Any]:
         # types into whichever field is already focused (issue #35): this never identifies a

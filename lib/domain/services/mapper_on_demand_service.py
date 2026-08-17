@@ -6,8 +6,10 @@ from lib.core.settings import Settings
 from lib.core.utils.clock import utc_now
 from lib.dal.local.database import session_scope
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
+from lib.domain.models.mapper_flow_model import MapperFlowStep
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperSessionStatus, MapperScreenCompletionState
 from lib.domain.services.mapper_churn_service import MapperChurnService
+from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
 from lib.domain.services.ui_mapper_service import UiMapperService
 
 
@@ -15,6 +17,11 @@ class MapperOnDemandService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.mapper = UiMapperService(settings)
+        # delegates actual execution to the same dispatch a saved Flow uses (issue #62): on-demand
+        # used to hand-roll its own if/elif per action_type, which is exactly how it fell behind
+        # (issue #61, only click/back existed for a long time) and drifted from what Flow already
+        # supported. One dispatch table, shared, can't drift again by construction.
+        self.flow_execution = MapperFlowExecutionService(settings)
 
     def list_packages(self) -> list[str]:
         output = self.mapper.adb.shell("pm list packages")
@@ -62,35 +69,53 @@ class MapperOnDemandService:
         *,
         session_id: int | None = None,
         action_id: int | None = None,
-        bounds: str | None = None,
         action_type: str = "click",
-        text: str | None = None,
-        clear: bool = False,
-        duration: float | None = None,
+        selector: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """`selector`/`params` are the exact same shape a `MapperFlowStep`/`/device/actions` use
+        (issue #62): `click`/`long_click_bounds`/`double_click_bounds`/`press_hold_start`/
+        `press_hold_release` want `{"bounds": ...}`, `drag_bounds` wants `{"from_bounds": ...,
+        "to_bounds": ...}`, `pinch` wants `{"resource_id": ..., "direction": "in"|"out"}`,
+        `type_text` wants `{"text": ..., "clear": bool}`, `clipboard_set` wants `{"text": ...}`,
+        `swipe_bounds` wants `{"bounds": ..., "direction": ...}`, `keyevent` wants
+        `{"keycode": ...}`; the rest (`swipe_up`, `swipe_down`, `scroll_up`, `scroll_down`,
+        `back`, `home`, `enter`, `dump_nodes`, `screenshot`, `ocr_extract`, `wait`,
+        `clipboard_get`) ignore both. One list, not duplicated here: it's whatever
+        `MapperFlowExecutionService._handlers` supports, since that's what actually runs it."""
         with session_scope() as session:
             repository = SqlAlchemyMapperRepository(session)
             mapper_session = self._ensure_session(repository, package_name, session_id=session_id)
             source_screen, _, _ = self._persist_current_screen(repository, mapper_session.id, package_name)
+            selector = dict(selector or {})
             action = None
-            click_bounds = bounds
             if action_id is not None:
                 action = repository.get_action(action_id)
                 if action is None or action.session_id != mapper_session.id:
                     raise ValueError("Mapper action not found for this session")
-                click_bounds = (action.metadata_json or {}).get("bounds")
-                if click_bounds is None and action.node_id is not None:
+                mapped_bounds = (action.metadata_json or {}).get("bounds")
+                if mapped_bounds is None and action.node_id is not None:
                     node = repository.get_node(action.node_id)
-                    click_bounds = None if node is None else node.bounds
+                    mapped_bounds = None if node is None else node.bounds
+                if mapped_bounds and "bounds" not in selector:
+                    selector["bounds"] = mapped_bounds
+                # "system_back" is how a mapped back action is stored (see below); dispatch still
+                # needs the plain "back" the handler table is keyed on
+                action_type = "back" if action.action_type == "system_back" else action.action_type
+                # a cataloged candidate is always persisted as plain "click" (_persist_current_screen
+                # never learns candidates/resource_id for it, only its bounds), but the Flow
+                # handler for "click" only ever reads candidates/resource_id, never bounds, that's
+                # click_bounds' job. Without this, every action_id-based click here would silently
+                # no-op (empty candidates -> nothing to match).
+                if action_type == "click" and selector.get("bounds") and not selector.get("candidates") and not selector.get("resource_id"):
+                    action_type = "click_bounds"
             if action is None:
                 # persisted action_type mirrors what actually ran (issue #61): it used to be
                 # hardcoded to "click" for anything that wasn't "back", which was harmless while
-                # click/back were the only two options, but would have mislabeled long_click_bounds
-                # and type_text now that they exist too
+                # click/back were the only two options, but would have mislabeled every gesture
+                # added since
                 inferred_action_type = "system_back" if action_type == "back" else action_type
-                # type_text has no bounds to key on (it types into whatever's already focused, same
-                # as everywhere else this action type is used), key on the text itself instead
-                action_key_target = click_bounds or (text if action_type == "type_text" else "back")
+                action_key_target = selector.get("bounds") or selector.get("from_bounds") or selector.get("resource_id") or selector.get("text") or "none"
                 action_key = f"on_demand:{action_type}:{action_key_target}"
                 action = repository.find_action_by_key(mapper_session.id, source_screen.id, action_key)
                 if action is None:
@@ -103,23 +128,13 @@ class MapperOnDemandService:
                         label="On-demand action",
                         safety=MapperActionSafety.SAFE,
                         executed=False,
-                        metadata_json={"bounds": click_bounds} if click_bounds else {},
+                        metadata_json={"bounds": selector["bounds"]} if selector.get("bounds") else {},
                     )
-            if action_type == "back" or action.action_type == "system_back":
-                self.mapper.adb.press_back()
-                success = True
-            elif action_type == "type_text" or action.action_type == "type_text":
-                if not text:
-                    raise ValueError("type_text action requires text")
-                success = self.mapper.ui.type_text(text, clear=clear)
-            elif action_type == "long_click_bounds" or action.action_type == "long_click_bounds":
-                if not click_bounds:
-                    raise ValueError("long_click_bounds action requires bounds or a mapped action with bounds")
-                success = self.mapper.ui.long_click_bounds(click_bounds, duration)
-            else:
-                if not click_bounds:
-                    raise ValueError("click action requires bounds or a mapped action with bounds")
-                success = self.mapper.ui.click_bounds(click_bounds)
+            # same dispatch, same safety gate, a saved Flow step already runs through (skip_dangerous_actions
+            # defaults True here too, matching /device/actions and Flow's own default)
+            step = MapperFlowStep(package_name=package_name, action_type=action_type, selector_json=selector, params_json=params)
+            outcome = self.flow_execution.run_step(step)
+            success = bool(outcome.get("success"))
             action.executed = True
             action.success = success
             to_screen_id = None
@@ -181,6 +196,14 @@ class MapperOnDemandService:
                 "action_id": action.id,
                 "success": success,
                 "result_type": result_type,
+                # passthrough from whatever the handler actually returned (issue #62): dump_nodes'
+                # node_count/nodes, screenshot's screenshot_path, ocr_extract's ocr_regions,
+                # clipboard_get's clipboard_text; absent for anything that doesn't set them
+                "node_count": outcome.get("node_count"),
+                "nodes": outcome.get("nodes"),
+                "screenshot_path": outcome.get("screenshot_path"),
+                "ocr_regions": outcome.get("ocr_regions"),
+                "clipboard_text": outcome.get("clipboard_text"),
             }
 
     def _ensure_session(self, repository: SqlAlchemyMapperRepository, package_name: str, *, session_id: int | None) -> Any:

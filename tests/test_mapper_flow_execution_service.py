@@ -85,6 +85,19 @@ class FakeUi:
         self.click_by_resource_id_result = True
         self.typed_text: list[tuple[str, bool]] = []
         self.type_text_result = True
+        self.double_clicked_bounds: list[tuple[str, float | None]] = []
+        self.double_click_bounds_result = True
+        self.dragged_bounds: list[tuple[str, str, float | None]] = []
+        self.drag_bounds_result = True
+        self.pinched: list[tuple[str, str, int, int]] = []
+        self.pinch_result = True
+        self.clipboard_set_calls: list[str] = []
+        self.clipboard_set_result = True
+        self.clipboard_text = ""
+        self.press_hold_started: list[str] = []
+        self.press_hold_start_result = True
+        self.press_hold_released: list[str] = []
+        self.press_hold_release_result = True
         # dumps are consumed one per call; once exhausted, the last one repeats (simulates the
         # screen "settling" once there's no more new content to scroll into)
         self.dump_sequence = list(dump_sequence) if dump_sequence else [[{"text": "hello"}]]
@@ -123,6 +136,33 @@ class FakeUi:
     def type_text(self, text: str, *, clear: bool = False) -> bool:
         self.typed_text.append((text, clear))
         return self.type_text_result
+
+    def double_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        self.double_clicked_bounds.append((bounds, duration))
+        return self.double_click_bounds_result
+
+    def drag_bounds(self, from_bounds: str, to_bounds: str, duration: float | None = None) -> bool:
+        self.dragged_bounds.append((from_bounds, to_bounds, duration))
+        return self.drag_bounds_result
+
+    def pinch_by_resource_id(self, resource_id: str, *, direction: str, percent: int = 100, steps: int = 50) -> bool:
+        self.pinched.append((resource_id, direction, percent, steps))
+        return self.pinch_result
+
+    def set_clipboard(self, text: str) -> bool:
+        self.clipboard_set_calls.append(text)
+        return self.clipboard_set_result
+
+    def get_clipboard(self) -> str:
+        return self.clipboard_text
+
+    def press_hold_start(self, bounds: str) -> bool:
+        self.press_hold_started.append(bounds)
+        return self.press_hold_start_result
+
+    def press_hold_release(self, bounds: str) -> bool:
+        self.press_hold_released.append(bounds)
+        return self.press_hold_release_result
 
 
 class FakeAdb:
@@ -183,6 +223,13 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
         "click_first_match": service._execute_click_first_match,
         "click_bounds": service._execute_click_bounds,
         "type_text": service._execute_type_text,
+        "double_click_bounds": service._execute_double_click_bounds,
+        "drag_bounds": service._execute_drag_bounds,
+        "pinch": service._execute_pinch,
+        "clipboard_set": service._execute_clipboard_set,
+        "clipboard_get": service._execute_clipboard_get,
+        "press_hold_start": service._execute_press_hold_start,
+        "press_hold_release": service._execute_press_hold_release,
         "scroll_up": service._execute_scroll_up,
         "scroll_down": service._execute_scroll_down,
         "back": service._execute_back,
@@ -291,6 +338,108 @@ def test_type_text_step_fails_without_text() -> None:
 
     assert result["success"] is False
     assert service.ui.typed_text == []
+
+
+def test_double_click_bounds_step_taps_twice_at_the_exact_region() -> None:
+    service = build_service()
+    step = make_step(action_type="double_click_bounds", selector_json={"bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.double_clicked_bounds == [("[0,0][50,20]", None)]
+
+
+def test_double_click_bounds_step_fails_without_bounds() -> None:
+    service = build_service()
+    step = make_step(action_type="double_click_bounds", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+
+
+def test_drag_bounds_step_drags_from_one_region_to_another() -> None:
+    service = build_service()
+    step = make_step(action_type="drag_bounds", selector_json={"from_bounds": "[0,0][50,20]", "to_bounds": "[0,100][50,120]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.dragged_bounds == [("[0,0][50,20]", "[0,100][50,120]", None)]
+
+
+def test_drag_bounds_step_fails_without_both_regions() -> None:
+    service = build_service()
+    step = make_step(action_type="drag_bounds", selector_json={"from_bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.dragged_bounds == []
+
+
+def test_pinch_step_zooms_the_selected_widget() -> None:
+    service = build_service()
+    step = make_step(action_type="pinch", selector_json={"resource_id": "com.instagram.android:id/photo", "direction": "out", "percent": 70, "steps": 40})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.pinched == [("com.instagram.android:id/photo", "out", 70, 40)]
+
+
+def test_pinch_step_fails_without_resource_id_or_direction() -> None:
+    service = build_service()
+    step = make_step(action_type="pinch", selector_json={"resource_id": "com.instagram.android:id/photo"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+
+
+def test_clipboard_set_step_writes_the_clipboard() -> None:
+    service = build_service()
+    step = make_step(action_type="clipboard_set", selector_json={"text": "copied text"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.clipboard_set_calls == ["copied text"]
+
+
+def test_clipboard_set_step_fails_without_text() -> None:
+    service = build_service()
+    step = make_step(action_type="clipboard_set", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+
+
+def test_clipboard_get_step_reads_the_clipboard() -> None:
+    service = build_service()
+    service.ui.clipboard_text = "already there"
+    step = make_step(action_type="clipboard_get", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert result["clipboard_text"] == "already there"
+
+
+def test_press_hold_start_and_release_steps_touch_down_then_up() -> None:
+    service = build_service()
+    start_step = make_step(action_type="press_hold_start", selector_json={"bounds": "[0,0][50,20]"})
+    release_step = make_step(action_type="press_hold_release", selector_json={"bounds": "[0,0][50,20]"})
+
+    started = service.run_step(start_step)
+    released = service.run_step(release_step)
+
+    assert started["success"] is True
+    assert released["success"] is True
+    assert service.ui.press_hold_started == ["[0,0][50,20]"]
+    assert service.ui.press_hold_released == ["[0,0][50,20]"]
 
 
 def test_scroll_down_step_swipes_down() -> None:

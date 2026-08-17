@@ -64,3 +64,4 @@ class DeviceActionResponse(BaseModel):
         default=None,
         description="Set by ocr_extract: [{\"text\": ..., \"bounds\": \"[x1,y1][x2,y2]\"}, ...], one per detected text region.",
     )
+    clipboard_text: str | None = Field(default=None, description="Set by clipboard_get: the device clipboard's current text.")
