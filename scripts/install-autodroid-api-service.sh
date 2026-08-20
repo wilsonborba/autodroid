@@ -55,8 +55,9 @@ echo 'reloading systemd'
 sudo systemctl daemon-reload
 echo "enabling ${SERVICE_NAME}"
 sudo systemctl enable "$SERVICE_NAME"
-echo 'installation complete'
+echo "starting ${SERVICE_NAME}"
+sudo systemctl restart "$SERVICE_NAME"
 echo
-echo 'next commands:'
-echo '  scripts/autodroid-api-service.sh start'
-echo '  scripts/autodroid-api-service.sh status'
+sudo systemctl status "$SERVICE_NAME" --no-pager -n 20 || true
+echo
+echo "autodroid API installed, enabled and running on http://127.0.0.1:${API_PORT}"
