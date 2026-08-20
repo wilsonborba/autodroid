@@ -35,6 +35,7 @@ class Job(Base):
     execution_window_start: Mapped[time | None] = mapped_column(Time(), nullable=True)
     execution_window_end: Mapped[time | None] = mapped_column(Time(), nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
