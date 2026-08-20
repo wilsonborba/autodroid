@@ -10,7 +10,7 @@ from pathlib import Path
 
 import typer
 
-from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
+from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_registry, get_session, get_settings
 from lib.core.logs import LogTarget, configure_logging, get_logger
 from lib.core.net import clear_api_state, find_available_port, is_port_available, write_api_state
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
@@ -150,6 +150,27 @@ def reprioritize_job(job_id: int, priority: int) -> None:
         typer.echo(JobFormatter.format(job))
 
 
+@jobs_app.command("force-stop")
+def force_stop_job(job_id: int) -> None:
+    """Unlike `cancel`, actually kills a RUNNING job's subprocess (SIGKILL), no need to stop
+    the autodroid-worker service itself. Pending/scheduled jobs are just cancelled outright."""
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        job = queue.force_stop_job(job_id)
+        typer.echo(JobFormatter.format(job))
+
+
+@jobs_app.command("delete")
+def delete_job(job_id: int) -> None:
+    """Force-stops the job first, then removes it (and its events) from the database."""
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        queue.delete_job(job_id)
+        typer.echo(f"job {job_id} deleted")
+
+
 @worker_app.command("run")
 def run_worker(iterations: int | None = typer.Option(None, help="Run dispatcher loop N times")) -> None:
     dispatcher = create_dispatcher()
@@ -157,6 +178,28 @@ def run_worker(iterations: int | None = typer.Option(None, help="Run dispatcher 
         typer.echo(JsonOutput.render(dispatcher.run_once()))
         return
     dispatcher.run_loop(iterations=iterations)
+
+
+@worker_app.command("run-claimed-job", hidden=True)
+def run_claimed_job(job_id: int) -> None:
+    """Internal: runs one already-claimed job's real runner in this subprocess. Spawned by the
+    dispatcher (lib/domain/services/subprocess_job_runner.py) so force-stopping this one job
+    means killing this process, never the dispatcher/worker service itself. Not meant to be
+    invoked by hand."""
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        job = queue.get_job(job_id)
+        if job is None:
+            typer.echo(f"job {job_id} not found", err=True)
+            raise typer.Exit(code=1)
+        runner = get_registry().get_runner(job.job_type)
+        try:
+            result = runner(job)
+        except Exception as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(JsonOutput.render(result))
 
 
 @worker_app.command("status")

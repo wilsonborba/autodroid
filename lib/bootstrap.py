@@ -13,6 +13,7 @@ from lib.domain.services.automation_service import AutomationRegistryService
 from lib.domain.services.dispatcher_service import DispatcherService
 from lib.domain.services.local_mapper_export_service import LocalMapperExportService
 from lib.domain.services.mapper_remap_task import MapperRemapTask
+from lib.domain.services.subprocess_job_runner import run_job_in_subprocess
 from lib.presentation.api.middleware import RequestLoggingMiddleware
 from lib.presentation.api.routes.android_sources import router as android_sources_router
 from lib.presentation.api.routes.device_actions import router as device_actions_router
@@ -42,11 +43,23 @@ def get_registry() -> AutomationRegistryService:
     return registry
 
 
+@lru_cache(maxsize=1)
+def get_dispatch_registry() -> AutomationRegistryService:
+    """What DispatcherService actually calls per job type. Every real runner from get_registry()
+    (used as-is by `worker run-claimed-job`, the subprocess this spawns) is wrapped so its work
+    happens in its own subprocess instead of the dispatcher's own process, so force_stop_job()
+    can kill one in-flight job (SIGKILL on job.pid) without stopping the worker service."""
+    dispatch_registry = AutomationRegistryService()
+    for job_type in get_registry().job_types():
+        dispatch_registry.register(job_type, run_job_in_subprocess)
+    return dispatch_registry
+
+
 def create_dispatcher() -> DispatcherService:
     settings = get_settings()
     return DispatcherService(
         session_factory=session_scope,
-        registry=get_registry(),
+        registry=get_dispatch_registry(),
         timezone=settings.timezone,
         worker_name=settings.worker_name,
         poll_interval_seconds=settings.queue_poll_interval_seconds,

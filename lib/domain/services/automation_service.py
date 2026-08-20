@@ -20,3 +20,6 @@ class AutomationRegistryService:
             return self._registry[job_type]
         except KeyError as exc:
             raise ValueError(f"No runner registered for job type {job_type}") from exc
+
+    def job_types(self) -> list[str]:
+        return list(self._registry)
