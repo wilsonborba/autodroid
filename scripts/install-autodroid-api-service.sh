@@ -6,6 +6,7 @@ SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 ENV_PATH="/etc/default/autodroid-api"
 PROJECT_DIR="/home/wilsonborba/Documents/Others/Asodya/autodroid"
 VENV_BIN="${PROJECT_DIR}/.venv/bin/autodroid"
+API_HOST="0.0.0.0"
 API_PORT="7777"
 
 if ! command -v sudo >/dev/null 2>&1; then
@@ -37,7 +38,7 @@ Group=wilsonborba
 WorkingDirectory=${PROJECT_DIR}
 EnvironmentFile=${ENV_PATH}
 Environment=HOME=/home/wilsonborba
-ExecStart=${VENV_BIN} serve-api --port ${API_PORT} --allow-dangerous-actions
+ExecStart=${VENV_BIN} serve-api --host ${API_HOST} --port ${API_PORT} --allow-dangerous-actions
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -55,8 +56,9 @@ echo 'reloading systemd'
 sudo systemctl daemon-reload
 echo "enabling ${SERVICE_NAME}"
 sudo systemctl enable "$SERVICE_NAME"
-echo 'installation complete'
+echo "starting ${SERVICE_NAME}"
+sudo systemctl restart "$SERVICE_NAME"
 echo
-echo 'next commands:'
-echo '  scripts/autodroid-api-service.sh start'
-echo '  scripts/autodroid-api-service.sh status'
+sudo systemctl status "$SERVICE_NAME" --no-pager -n 20 || true
+echo
+echo "autodroid API installed, enabled and running on http://${API_HOST}:${API_PORT}"
