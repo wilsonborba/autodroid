@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from urllib.parse import quote
+
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 
 from lib.core.logs import get_logger
 from lib.presentation.api.dependencies import get_android_sources_service
@@ -28,6 +30,28 @@ def list_files(package_name: str, path: str | None = None):
         return AndroidSourcesListResponse(**get_android_sources_service().list_files(package_name, path=path))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/{package_name}/files/content",
+    summary="Download one file from an app's data or a shared staging folder",
+    response_class=Response,
+)
+def download_file(package_name: str, path: str):
+    logger.info("GET /android-sources/%s/files/content path=%s", package_name, path)
+    try:
+        result = get_android_sources_service().read_file(package_name, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = quote(result["filename"])
+    return Response(
+        content=result["content"],
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            "X-Android-Source-Path": result["path"],
+        },
+    )
 
 
 @router.delete(

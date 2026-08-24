@@ -12,12 +12,19 @@ class FakeAndroidSourcesService:
         self.dangerous_allowed = dangerous_allowed
         self.deleted_calls: list[tuple[str, str]] = []
         self.staged_calls: list[tuple[str, str, bytes, str | None]] = []
+        self.read_calls: list[tuple[str, str]] = []
 
     def list_files(self, package_name: str, *, path: str | None = None):
         if path and "com.other.app" in path:
             raise ValueError(f"{path!r} is outside the allowed scope for {package_name}")
         target = path or f"/data/data/{package_name}"
         return {"package_name": package_name, "path": target, "raw": "total 0\n", "entries": []}
+
+    def read_file(self, package_name: str, path: str):
+        if "com.other.app" in path:
+            raise ValueError(f"{path!r} is outside the allowed scope for {package_name}")
+        self.read_calls.append((package_name, path))
+        return {"package_name": package_name, "path": path, "filename": "905", "content": b"zip-bytes", "size_bytes": len(b"zip-bytes")}
 
     def delete_file(self, package_name: str, path: str):
         if not self.dangerous_allowed:
@@ -49,6 +56,33 @@ def test_list_files_endpoint_returns_400_for_out_of_scope_path(monkeypatch) -> N
     response = client.get(f"/android-sources/{PACKAGE_NAME}/files", params={"path": "/data/data/com.other.app"})
 
     assert response.status_code == 400
+
+
+def test_download_file_endpoint_returns_binary_content(monkeypatch) -> None:
+    service = FakeAndroidSourcesService()
+    monkeypatch.setattr("lib.presentation.api.routes.android_sources.get_android_sources_service", lambda: service)
+    client = TestClient(create_api_app())
+    path = f"/sdcard/Android/data/{PACKAGE_NAME}/files/chats/chat-id/messages/905"
+
+    response = client.get(f"/android-sources/{PACKAGE_NAME}/files/content", params={"path": path})
+
+    assert response.status_code == 200
+    assert response.content == b"zip-bytes"
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["x-android-source-path"] == path
+    assert "filename*=UTF-8''905" in response.headers["content-disposition"]
+    assert service.read_calls == [(PACKAGE_NAME, path)]
+
+
+def test_download_file_endpoint_returns_400_for_out_of_scope_path(monkeypatch) -> None:
+    service = FakeAndroidSourcesService()
+    monkeypatch.setattr("lib.presentation.api.routes.android_sources.get_android_sources_service", lambda: service)
+    client = TestClient(create_api_app())
+
+    response = client.get(f"/android-sources/{PACKAGE_NAME}/files/content", params={"path": "/data/data/com.other.app/files/secret.zip"})
+
+    assert response.status_code == 400
+    assert service.read_calls == []
 
 
 def test_delete_file_endpoint_when_allowed(monkeypatch) -> None:

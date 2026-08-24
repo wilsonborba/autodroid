@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from lib.core.logs import get_logger
 from lib.core.settings import Settings
@@ -50,6 +52,19 @@ class AndroidSourcesService:
         output = self.adb.list_dir(target)
         self.logger.debug("Listed %s for %s: %d line(s)", target, package_name, output.count("\n") + 1 if output else 0)
         return {"package_name": package_name, "path": target, "raw": output, "entries": [line for line in output.splitlines() if line.strip()]}
+
+    def read_file(self, package_name: str, path: str) -> dict[str, Any]:
+        self._validate_scope(package_name, path)
+        filename = Path(path).name or "download"
+        local_tmp = self.settings.output_dir / "android_sources_pulls" / package_name / f"{uuid4().hex}-{filename}"
+        local_tmp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.adb.pull_file(path, str(local_tmp))
+            content = local_tmp.read_bytes()
+        finally:
+            local_tmp.unlink(missing_ok=True)
+        self.logger.info("Read %s (%d bytes) for %s", path, len(content), package_name)
+        return {"package_name": package_name, "path": path, "filename": filename, "content": content, "size_bytes": len(content)}
 
     def delete_file(self, package_name: str, path: str) -> dict[str, Any]:
         if not self.settings.allow_dangerous_actions:

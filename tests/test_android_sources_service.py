@@ -23,7 +23,9 @@ class FakeAdb:
         self.listed: list[str] = []
         self.deleted: list[str] = []
         self.pushed: list[tuple[str, str]] = []
+        self.pulled: list[tuple[str, str]] = []
         self.list_dir_result = "total 0\ndrwx------ 2 u0_a123 u0_a123 4096 file1.jpg\n"
+        self.pull_content = b"downloaded-bytes"
 
     def list_dir(self, path: str) -> str:
         self.listed.append(path)
@@ -35,6 +37,11 @@ class FakeAdb:
 
     def push_file(self, local_path: str, remote_path: str) -> str:
         self.pushed.append((local_path, remote_path))
+        return ""
+
+    def pull_file(self, remote_path: str, local_path: str) -> str:
+        self.pulled.append((remote_path, local_path))
+        Path(local_path).write_bytes(self.pull_content)
         return ""
 
 
@@ -85,6 +92,31 @@ def test_list_files_rejects_a_system_path() -> None:
 
     with pytest.raises(ValueError, match="outside the allowed scope"):
         service.list_files(PACKAGE_NAME, path="/system")
+
+
+def test_read_file_pulls_remote_file_then_cleans_up_local_copy() -> None:
+    service = _build_service()
+    target = f"/sdcard/Android/data/{PACKAGE_NAME}/files/chats/chat-id/messages/905"
+
+    result = service.read_file(PACKAGE_NAME, target)
+
+    assert result["path"] == target
+    assert result["filename"] == "905"
+    assert result["content"] == b"downloaded-bytes"
+    assert result["size_bytes"] == len(b"downloaded-bytes")
+    assert len(service.adb.pulled) == 1
+    remote_path, local_path = service.adb.pulled[0]
+    assert remote_path == target
+    assert not Path(local_path).exists()
+
+
+def test_read_file_rejects_path_outside_scope() -> None:
+    service = _build_service()
+
+    with pytest.raises(ValueError, match="outside the allowed scope"):
+        service.read_file(PACKAGE_NAME, "/data/data/com.other.app/files/secret.zip")
+
+    assert service.adb.pulled == []
 
 
 def test_delete_file_requires_allow_dangerous_actions() -> None:
