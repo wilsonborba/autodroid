@@ -17,6 +17,17 @@ def test_mapper_mode_limits_are_ordered_by_depth_and_actions() -> None:
     assert light.max_consecutive_empty_scrolls < medium.max_consecutive_empty_scrolls < deep.max_consecutive_empty_scrolls
 
 
+def test_deep_mode_action_ceiling_is_a_technical_backstop_not_a_coverage_budget() -> None:
+    # deep maps everything, it only stops on its own once nothing new is left (issue #36):
+    # max_actions here must not be a realistic-to-hit product budget like light/medium's
+    service = MapperModeService()
+
+    deep = service.get_limits(MapperMode.DEEP)
+
+    assert deep.max_actions == MapperModeService.DEEP_ACTIONS_CEILING
+    assert deep.max_actions > 1_000_000
+
+
 def test_max_consecutive_empty_scrolls_stays_well_below_the_scroll_safety_ceiling() -> None:
     # max_consecutive_empty_scrolls is what actually stops a scrolling screen (issue #25),
     # max_scrolls is only the safety ceiling behind it, it should rarely be the deciding factor

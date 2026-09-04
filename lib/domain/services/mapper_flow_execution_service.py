@@ -52,8 +52,23 @@ class MapperFlowExecutionService:
             "click_first_match": self._execute_click_first_match,
             "click_bounds": self._execute_click_bounds,
             "type_text": self._execute_type_text,
+            "swipe_up": self._execute_swipe_up,
+            "swipe_down": self._execute_swipe_down,
+            "swipe_bounds": self._execute_swipe_bounds,
+            "long_click_bounds": self._execute_long_click_bounds,
+            "double_click_bounds": self._execute_double_click_bounds,
+            "drag_bounds": self._execute_drag_bounds,
+            "pinch": self._execute_pinch,
+            "clipboard_set": self._execute_clipboard_set,
+            "clipboard_get": self._execute_clipboard_get,
+            "press_hold_start": self._execute_press_hold_start,
+            "press_hold_release": self._execute_press_hold_release,
             "scroll_up": self._execute_scroll_up,
+            "scroll_down": self._execute_scroll_down,
             "back": self._execute_back,
+            "home": self._execute_home,
+            "enter": self._execute_enter,
+            "keyevent": self._execute_keyevent,
             "wait": self._execute_wait,
             "dump_nodes": self._execute_dump_nodes,
             "screenshot": self._execute_screenshot,
@@ -177,11 +192,14 @@ class MapperFlowExecutionService:
 
     def _ensure_screen(self, package_name: str, source_session_id: int, target_screen_id: int, current_screen_id: int | None) -> None:
         if target_screen_id == current_screen_id:
+            self.logger.debug("Already on screen %s, no navigation needed", target_screen_id)
             return
         flow = MapperFlow(package_name=package_name, source_session_id=source_session_id)
         if current_screen_id is not None:
+            self.logger.debug("Bridging gap %s -> %s before running the requested action", current_screen_id, target_screen_id)
             self._bridge_gap(flow, current_screen_id, target_screen_id)
         else:
+            self.logger.debug("Current screen unknown, relaunching %s to reach screen %s from the root", package_name, target_screen_id)
             self._relaunch_to_screen(flow, target_screen_id)
 
     def _relaunch_to_screen(self, flow: MapperFlow, target_screen_id: int) -> None:
@@ -190,6 +208,7 @@ class MapperFlowExecutionService:
         # departure recovery in the mapper itself (issue #28), here for the on-demand executor
         with session_scope() as session:
             _root_screen_id, ancestor_steps = MapperFlowService(session).resolve_restart_plan(flow.package_name, target_screen_id)
+        self.logger.debug("Replaying %s ancestor step(s) after relaunch to reach screen %s", len(ancestor_steps), target_screen_id)
         self.navigation_context.prepare_fresh_app_launch(flow.package_name)
         for step in ancestor_steps:
             self.run_step(step)
@@ -226,6 +245,7 @@ class MapperFlowExecutionService:
                 node = mapper_repository.get_node(action.node_id) if action and action.node_id else None
                 route_edges.append((transition.id, node.bounds if node else None))
 
+        self.logger.debug("Route planner chose %s (%s) for %s -> %s", plan.strategy_type, plan.reason, current_screen_id, target_screen_id)
         started_at = time.monotonic()
         success = True
         transition_observations: list[tuple[int, float, bool]] = []
@@ -241,6 +261,7 @@ class MapperFlowExecutionService:
             for transition_id, bounds in route_edges:
                 edge_started_at = time.monotonic()
                 edge_success = bounds is not None and self.ui.click_bounds(bounds)
+                self.logger.debug("Route edge (transition %s, bounds=%s) -> success=%s", transition_id, bounds, edge_success)
                 transition_observations.append((transition_id, (time.monotonic() - edge_started_at) * 1000, edge_success))
                 if not edge_success:
                     success = False
@@ -301,7 +322,7 @@ class MapperFlowExecutionService:
             last_result = self._run_step_once(step, flow_id=flow_id, skip_dangerous_actions=skip_dangerous_actions)
             iteration += 1
 
-            fingerprint = self._current_fingerprint()
+            fingerprint = self._current_fingerprint(step.package_name)
             if last_fingerprint is not None and fingerprint == last_fingerprint:
                 stop_reason = "no_new_content"
                 break
@@ -313,8 +334,12 @@ class MapperFlowExecutionService:
         )
         return {**last_result, "iterations_run": iteration, "stop_reason": stop_reason}
 
-    def _current_fingerprint(self) -> str:
-        return self.fingerprint_service.fingerprint(self.ui.dump_nodes())
+    def _current_fingerprint(self, package_name: str) -> str:
+        # package_name filters out volatile status-bar/launcher noise (clock, battery, signal
+        # icons) that isn't part of the app being driven, otherwise "no new content" (issue #47)
+        # would almost never trigger: the clock alone changes the fingerprint every minute even
+        # when the screen itself genuinely hasn't changed at all
+        return self.fingerprint_service.fingerprint(self.ui.dump_nodes(), package_name)
 
     def _within_execution_window(self, window_start: str, window_end: str) -> bool:
         start = time_of_day.fromisoformat(window_start)
@@ -330,7 +355,7 @@ class MapperFlowExecutionService:
         label = self._describe_step(step)
         safety = self.safety_service.classify({"text": label, "content_desc": label, "resource_id": ""}, label)
 
-        if safety == MapperActionSafety.DANGEROUS and skip_dangerous_actions:
+        if safety == MapperActionSafety.DANGEROUS and skip_dangerous_actions and not self.settings.allow_dangerous_actions:
             self.logger.warning("Blocked dangerous flow step %s (%s: %r)", step.id, step.action_type, label)
             return {"step_id": step.id, "action_type": step.action_type, "success": False, "skipped_reason": "dangerous_action_blocked"}
 
@@ -380,7 +405,17 @@ class MapperFlowExecutionService:
         return ""
 
     def _execute_click(self, step: MapperFlowStep) -> dict[str, Any]:
-        candidates = (step.selector_json or {}).get("candidates") or []
+        # resource_id first when the mapped node had one (issue #18's own spec called it the
+        # resilient option): it survives across targets whose visible text is dynamic (a DM
+        # reply bar showing "Reply to <contact>", a comment field showing "Add a comment for
+        # <author>"), where the text itself never repeats from one run to the next. Falls back to
+        # text/content_desc candidates when there's no resource_id, or the resource_id didn't
+        # match anything (app update, or a resource_id that isn't actually unique on this screen).
+        selector = step.selector_json or {}
+        resource_id = selector.get("resource_id")
+        if resource_id and self.ui.click_by_resource_id(resource_id):
+            return {"success": True}
+        candidates = selector.get("candidates") or []
         return {"success": self.ui.click_first_by_text_or_description(*candidates)}
 
     def _execute_click_first_match(self, step: MapperFlowStep) -> dict[str, Any]:
@@ -404,6 +439,82 @@ class MapperFlowExecutionService:
             return {"success": False}
         return {"success": self.ui.click_bounds(bounds)}
 
+    def _execute_swipe_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # a directional swipe anchored to one element (not the whole screen, unlike swipe_up/
+        # swipe_down): the touch equivalent of dragging with a mouse, needed for gestures an app
+        # only recognizes when they start on a specific element, e.g. swiping a chat message
+        # sideways to reveal its reply action
+        selector = step.selector_json or {}
+        bounds = selector.get("bounds")
+        direction = selector.get("direction")
+        if not bounds or not direction:
+            return {"success": False}
+        return {"success": self.ui.swipe_bounds(bounds, direction, selector.get("distance"))}
+
+    def _execute_long_click_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # press-and-hold on an exact region: a touchscreen's equivalent of a right-click, the
+        # gesture most apps use to surface a contextual menu (reply, forward, pin, delete, ...)
+        # on an element instead of activating it
+        bounds = (step.selector_json or {}).get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.long_click_bounds(bounds, (step.selector_json or {}).get("duration"))}
+
+    def _execute_double_click_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # two quick taps at the same point (issue #62): the "like" gesture in most social apps
+        selector = step.selector_json or {}
+        bounds = selector.get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.double_click_bounds(bounds, selector.get("duration"))}
+
+    def _execute_drag_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # press on one element, move, release on another (issue #62): has an actual drop target,
+        # unlike swipe_bounds which only has a direction and a distance
+        selector = step.selector_json or {}
+        from_bounds = selector.get("from_bounds")
+        to_bounds = selector.get("to_bounds")
+        if not from_bounds or not to_bounds:
+            return {"success": False}
+        return {"success": self.ui.drag_bounds(from_bounds, to_bounds, selector.get("duration"))}
+
+    def _execute_pinch(self, step: MapperFlowStep) -> dict[str, Any]:
+        # zoom in/out (issue #62): only exists on a selected widget (resource_id), uiautomator2
+        # has no raw-coordinate two-finger primitive, so there's no bounds variant of this one
+        selector = step.selector_json or {}
+        resource_id = selector.get("resource_id")
+        direction = selector.get("direction")
+        if not resource_id or not direction:
+            return {"success": False}
+        return {"success": self.ui.pinch_by_resource_id(resource_id, direction=direction, percent=selector.get("percent", 100), steps=selector.get("steps", 50))}
+
+    def _execute_clipboard_set(self, step: MapperFlowStep) -> dict[str, Any]:
+        # writes the clipboard so a later step can paste it, e.g. long-press a field then tap
+        # "Paste" (issue #62): the other half of type_text, which always simulates keystrokes
+        text = (step.selector_json or {}).get("text")
+        if not text:
+            return {"success": False}
+        return {"success": self.ui.set_clipboard(text)}
+
+    def _execute_clipboard_get(self, step: MapperFlowStep) -> dict[str, Any]:
+        return {"success": True, "clipboard_text": self.ui.get_clipboard()}
+
+    def _execute_press_hold_start(self, step: MapperFlowStep) -> dict[str, Any]:
+        # first half of a caller-controlled press-and-release (issue #62): for holding until some
+        # other condition is met (recording a voice message) instead of a fixed duration like
+        # long_click_bounds; the caller is responsible for eventually running press_hold_release
+        # at the same bounds, nothing here starts a timer
+        bounds = (step.selector_json or {}).get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.press_hold_start(bounds)}
+
+    def _execute_press_hold_release(self, step: MapperFlowStep) -> dict[str, Any]:
+        bounds = (step.selector_json or {}).get("bounds")
+        if not bounds:
+            return {"success": False}
+        return {"success": self.ui.press_hold_release(bounds)}
+
     def _execute_type_text(self, step: MapperFlowStep) -> dict[str, Any]:
         # types into whichever field is already focused (issue #35): this never identifies a
         # target itself, the caller clicks the field first (click/click_bounds), one thing per
@@ -415,11 +526,38 @@ class MapperFlowExecutionService:
         return {"success": self.ui.type_text(text, clear=bool(selector.get("clear")))}
 
     def _execute_scroll_up(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.ui.swipe_down()
+        return {"success": True}
+
+    def _execute_scroll_down(self, step: MapperFlowStep) -> dict[str, Any]:
         self.ui.swipe_up()
+        return {"success": True}
+
+    def _execute_swipe_up(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.ui.swipe_up()
+        return {"success": True}
+
+    def _execute_swipe_down(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.ui.swipe_down()
         return {"success": True}
 
     def _execute_back(self, step: MapperFlowStep) -> dict[str, Any]:
         self.adb.press_back()
+        return {"success": True}
+
+    def _execute_home(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.adb.go_home()
+        return {"success": True}
+
+    def _execute_enter(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.adb.press_enter()
+        return {"success": True}
+
+    def _execute_keyevent(self, step: MapperFlowStep) -> dict[str, Any]:
+        keycode = (step.selector_json or {}).get("keycode")
+        if not keycode:
+            return {"success": False}
+        self.adb.keyevent(str(keycode))
         return {"success": True}
 
     def _execute_wait(self, step: MapperFlowStep) -> dict[str, Any]:

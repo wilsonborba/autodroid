@@ -77,11 +77,31 @@ class FakeUi:
         self.exact_result = True
         self.contains_result = True
         self.swipes = 0
+        self.swipes_down = 0
         self.screenshots: list[str] = []
         self.clicked_bounds: list[str] = []
         self.click_bounds_result = True
+        self.swiped_bounds: list[tuple[str, str, int | None]] = []
+        self.swipe_bounds_result = True
+        self.long_clicked_bounds: list[tuple[str, float | None]] = []
+        self.long_click_bounds_result = True
         self.typed_text: list[tuple[str, bool]] = []
         self.type_text_result = True
+        self.clicked_resource_ids: list[str] = []
+        self.click_by_resource_id_result = True
+        self.double_clicked_bounds: list[tuple[str, float | None]] = []
+        self.double_click_bounds_result = True
+        self.dragged_bounds: list[tuple[str, str, float | None]] = []
+        self.drag_bounds_result = True
+        self.pinched: list[tuple[str, str, int, int]] = []
+        self.pinch_result = True
+        self.clipboard_set_calls: list[str] = []
+        self.clipboard_set_result = True
+        self.clipboard_text = ""
+        self.press_hold_started: list[str] = []
+        self.press_hold_start_result = True
+        self.press_hold_released: list[str] = []
+        self.press_hold_release_result = True
         # dumps are consumed one per call; once exhausted, the last one repeats (simulates the
         # screen "settling" once there's no more new content to scroll into)
         self.dump_sequence = list(dump_sequence) if dump_sequence else [[{"text": "hello"}]]
@@ -89,6 +109,10 @@ class FakeUi:
     def click_first_by_text_or_description(self, *candidates: str) -> bool:
         self.clicked_exact.append(candidates)
         return self.exact_result
+
+    def click_by_resource_id(self, resource_id: str) -> bool:
+        self.clicked_resource_ids.append(resource_id)
+        return self.click_by_resource_id_result
 
     def click_first_by_text_or_description_contains(self, *candidates: str) -> bool:
         self.clicked_contains.append(candidates)
@@ -106,9 +130,47 @@ class FakeUi:
         self.screenshots.append(str(path))
         return path
 
+    def swipe_down(self) -> None:
+        self.swipes_down += 1
+
     def click_bounds(self, bounds: str) -> bool:
         self.clicked_bounds.append(bounds)
         return self.click_bounds_result
+
+    def swipe_bounds(self, bounds: str, direction: str, distance: int | None = None) -> bool:
+        self.swiped_bounds.append((bounds, direction, distance))
+        return self.swipe_bounds_result
+
+    def double_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        self.double_clicked_bounds.append((bounds, duration))
+        return self.double_click_bounds_result
+
+    def drag_bounds(self, from_bounds: str, to_bounds: str, duration: float | None = None) -> bool:
+        self.dragged_bounds.append((from_bounds, to_bounds, duration))
+        return self.drag_bounds_result
+
+    def pinch_by_resource_id(self, resource_id: str, *, direction: str, percent: int = 100, steps: int = 50) -> bool:
+        self.pinched.append((resource_id, direction, percent, steps))
+        return self.pinch_result
+
+    def set_clipboard(self, text: str) -> bool:
+        self.clipboard_set_calls.append(text)
+        return self.clipboard_set_result
+
+    def get_clipboard(self) -> str:
+        return self.clipboard_text
+
+    def press_hold_start(self, bounds: str) -> bool:
+        self.press_hold_started.append(bounds)
+        return self.press_hold_start_result
+
+    def press_hold_release(self, bounds: str) -> bool:
+        self.press_hold_released.append(bounds)
+        return self.press_hold_release_result
+
+    def long_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        self.long_clicked_bounds.append((bounds, duration))
+        return self.long_click_bounds_result
 
     def type_text(self, text: str, *, clear: bool = False) -> bool:
         self.typed_text.append((text, clear))
@@ -118,9 +180,21 @@ class FakeUi:
 class FakeAdb:
     def __init__(self) -> None:
         self.back_calls = 0
+        self.home_calls = 0
+        self.enter_calls = 0
+        self.keyevents: list[str] = []
 
     def press_back(self) -> None:
         self.back_calls += 1
+
+    def go_home(self) -> None:
+        self.home_calls += 1
+
+    def press_enter(self) -> None:
+        self.enter_calls += 1
+
+    def keyevent(self, keycode: str) -> None:
+        self.keyevents.append(keycode)
 
 
 class FakeNav:
@@ -149,7 +223,7 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
 
     service.logger = get_logger(__name__)
     settings = load_settings()
-    service.settings = type("Settings", (), {"output_dir": __import__("pathlib").Path("/tmp/autodroid-flow-tests"), "timezone": settings.timezone})()
+    service.settings = type("Settings", (), {"output_dir": __import__("pathlib").Path("/tmp/autodroid-flow-tests"), "timezone": settings.timezone, "allow_dangerous_actions": False})()
     service.ui = FakeUi(dump_sequence)
     service.adb = FakeAdb()
     service.navigation_context = FakeNav()
@@ -161,8 +235,23 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
         "click_first_match": service._execute_click_first_match,
         "click_bounds": service._execute_click_bounds,
         "type_text": service._execute_type_text,
+        "swipe_up": service._execute_swipe_up,
+        "swipe_down": service._execute_swipe_down,
+        "swipe_bounds": service._execute_swipe_bounds,
+        "long_click_bounds": service._execute_long_click_bounds,
+        "double_click_bounds": service._execute_double_click_bounds,
+        "drag_bounds": service._execute_drag_bounds,
+        "pinch": service._execute_pinch,
+        "clipboard_set": service._execute_clipboard_set,
+        "clipboard_get": service._execute_clipboard_get,
+        "press_hold_start": service._execute_press_hold_start,
+        "press_hold_release": service._execute_press_hold_release,
         "scroll_up": service._execute_scroll_up,
+        "scroll_down": service._execute_scroll_down,
         "back": service._execute_back,
+        "home": service._execute_home,
+        "enter": service._execute_enter,
+        "keyevent": service._execute_keyevent,
         "wait": service._execute_wait,
         "dump_nodes": service._execute_dump_nodes,
         "screenshot": service._execute_screenshot,
@@ -192,6 +281,31 @@ def test_click_step_executes_and_reports_success() -> None:
     assert service.ui.clicked_exact == [("Profile", "Perfil")]
 
 
+def test_click_step_prefers_resource_id_over_text_candidates() -> None:
+    # issue #60: resource_id is stable across targets whose visible text is dynamic (a DM reply
+    # bar showing "Reply to <contact>"), so it must be tried before falling back to text
+    service = build_service()
+    step = make_step(action_type="click", selector_json={"resource_id": "com.instagram.android:id/reply_bar_edittext", "candidates": ["Reply to Rafael Alexandre ...."]})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.clicked_resource_ids == ["com.instagram.android:id/reply_bar_edittext"]
+    assert service.ui.clicked_exact == []
+
+
+def test_click_step_falls_back_to_text_when_resource_id_click_fails() -> None:
+    service = build_service()
+    service.ui.click_by_resource_id_result = False
+    step = make_step(action_type="click", selector_json={"resource_id": "stale_id", "candidates": ["Profile"]})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.clicked_resource_ids == ["stale_id"]
+    assert service.ui.clicked_exact == [("Profile",)]
+
+
 def test_click_bounds_step_clicks_the_exact_region() -> None:
     service = build_service()
     step = make_step(action_type="click_bounds", selector_json={"bounds": "[0,0][50,20]"})
@@ -210,6 +324,158 @@ def test_click_bounds_step_fails_without_bounds() -> None:
 
     assert result["success"] is False
     assert service.ui.clicked_bounds == []
+
+
+def test_swipe_bounds_step_swipes_from_the_exact_region() -> None:
+    service = build_service()
+    step = make_step(action_type="swipe_bounds", selector_json={"bounds": "[0,0][50,20]", "direction": "left"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swiped_bounds == [("[0,0][50,20]", "left", None)]
+
+
+def test_swipe_bounds_step_passes_an_explicit_distance_through() -> None:
+    service = build_service()
+    step = make_step(action_type="swipe_bounds", selector_json={"bounds": "[0,0][50,20]", "direction": "right", "distance": 300})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swiped_bounds == [("[0,0][50,20]", "right", 300)]
+
+
+def test_swipe_bounds_step_fails_without_bounds_or_direction() -> None:
+    service = build_service()
+    step = make_step(action_type="swipe_bounds", selector_json={"bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.swiped_bounds == []
+
+
+def test_long_click_bounds_step_presses_the_exact_region() -> None:
+    service = build_service()
+    step = make_step(action_type="long_click_bounds", selector_json={"bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.long_clicked_bounds == [("[0,0][50,20]", None)]
+
+
+def test_long_click_bounds_step_fails_without_bounds() -> None:
+    service = build_service()
+    step = make_step(action_type="long_click_bounds", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.long_clicked_bounds == []
+
+
+def test_double_click_bounds_step_taps_twice_at_the_exact_region() -> None:
+    service = build_service()
+    step = make_step(action_type="double_click_bounds", selector_json={"bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.double_clicked_bounds == [("[0,0][50,20]", None)]
+
+
+def test_double_click_bounds_step_fails_without_bounds() -> None:
+    service = build_service()
+    step = make_step(action_type="double_click_bounds", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+
+
+def test_drag_bounds_step_drags_from_one_region_to_another() -> None:
+    service = build_service()
+    step = make_step(action_type="drag_bounds", selector_json={"from_bounds": "[0,0][50,20]", "to_bounds": "[0,100][50,120]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.dragged_bounds == [("[0,0][50,20]", "[0,100][50,120]", None)]
+
+
+def test_drag_bounds_step_fails_without_both_regions() -> None:
+    service = build_service()
+    step = make_step(action_type="drag_bounds", selector_json={"from_bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.dragged_bounds == []
+
+
+def test_pinch_step_zooms_the_selected_widget() -> None:
+    service = build_service()
+    step = make_step(action_type="pinch", selector_json={"resource_id": "com.instagram.android:id/photo", "direction": "out", "percent": 70, "steps": 40})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.pinched == [("com.instagram.android:id/photo", "out", 70, 40)]
+
+
+def test_pinch_step_fails_without_resource_id_or_direction() -> None:
+    service = build_service()
+    step = make_step(action_type="pinch", selector_json={"resource_id": "com.instagram.android:id/photo"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+
+
+def test_clipboard_set_step_writes_the_clipboard() -> None:
+    service = build_service()
+    step = make_step(action_type="clipboard_set", selector_json={"text": "copied text"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.clipboard_set_calls == ["copied text"]
+
+
+def test_clipboard_set_step_fails_without_text() -> None:
+    service = build_service()
+    step = make_step(action_type="clipboard_set", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+
+
+def test_clipboard_get_step_reads_the_clipboard() -> None:
+    service = build_service()
+    service.ui.clipboard_text = "already there"
+    step = make_step(action_type="clipboard_get", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert result["clipboard_text"] == "already there"
+
+
+def test_press_hold_start_and_release_steps_touch_down_then_up() -> None:
+    service = build_service()
+    start_step = make_step(action_type="press_hold_start", selector_json={"bounds": "[0,0][50,20]"})
+    release_step = make_step(action_type="press_hold_release", selector_json={"bounds": "[0,0][50,20]"})
+
+    started = service.run_step(start_step)
+    released = service.run_step(release_step)
+
+    assert started["success"] is True
+    assert released["success"] is True
+    assert service.ui.press_hold_started == ["[0,0][50,20]"]
+    assert service.ui.press_hold_released == ["[0,0][50,20]"]
 
 
 def test_type_text_step_types_into_the_focused_field() -> None:
@@ -242,6 +508,86 @@ def test_type_text_step_fails_without_text() -> None:
     assert service.ui.typed_text == []
 
 
+def test_scroll_down_step_swipes_up_to_reveal_lower_content() -> None:
+    service = build_service()
+    step = make_step(action_type="scroll_down")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swipes == 1
+
+
+def test_scroll_up_step_swipes_down_to_reveal_earlier_content() -> None:
+    service = build_service()
+    step = make_step(action_type="scroll_up")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swipes_down == 1
+
+
+def test_swipe_down_step_keeps_raw_gesture_semantics() -> None:
+    service = build_service()
+    step = make_step(action_type="swipe_down")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swipes_down == 1
+
+
+def test_swipe_up_step_keeps_raw_gesture_semantics() -> None:
+    service = build_service()
+    step = make_step(action_type="swipe_up")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swipes == 1
+
+
+def test_enter_step_presses_enter() -> None:
+    service = build_service()
+    step = make_step(action_type="enter")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.adb.enter_calls == 1
+
+
+def test_home_step_goes_home() -> None:
+    service = build_service()
+    step = make_step(action_type="home")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.adb.home_calls == 1
+
+
+def test_keyevent_step_sends_requested_keycode() -> None:
+    service = build_service()
+    step = make_step(action_type="keyevent", selector_json={"keycode": "KEYCODE_SEARCH"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.adb.keyevents == ["KEYCODE_SEARCH"]
+
+
+def test_keyevent_step_fails_without_keycode() -> None:
+    service = build_service()
+    step = make_step(action_type="keyevent", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.adb.keyevents == []
+
+
 def test_ocr_extract_step_returns_text_regions() -> None:
     service = build_service()
     step = make_step(action_type="ocr_extract", selector_json={})
@@ -269,6 +615,18 @@ def test_click_step_dangerous_allowed_with_override() -> None:
 
     result = service.run_step(step, skip_dangerous_actions=False)
 
+    assert result["skipped_reason"] is None
+    assert service.ui.clicked_exact == [("Delete account",)]
+
+
+def test_click_step_dangerous_allowed_when_process_flag_is_enabled() -> None:
+    service = build_service()
+    service.settings.allow_dangerous_actions = True
+    step = make_step(action_type="click", selector_json={"candidates": ["Delete account"]})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
     assert result["skipped_reason"] is None
     assert service.ui.clicked_exact == [("Delete account",)]
 
@@ -333,7 +691,7 @@ def test_run_flow_executes_all_steps_in_order() -> None:
     flow = MapperFlow(id=1, name="extract_profile", package_name="com.linkedin.android")
     steps = [
         make_step(id=10, action_type="click", selector_json={"candidates": ["Profile"]}),
-        make_step(id=11, action_type="scroll_up"),
+        make_step(id=11, action_type="scroll_down"),
         make_step(id=12, action_type="dump_nodes"),
     ]
 
@@ -351,7 +709,7 @@ def _changing_dumps(count: int) -> list[list[dict]]:
 
 def test_repeated_step_stops_at_max_iterations() -> None:
     service = build_service(dump_sequence=_changing_dumps(20))
-    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_iterations": 5}})
+    step = make_step(action_type="scroll_down", params_json={"repeat": {"max_iterations": 5}})
 
     result = service.run_step(step)
 
@@ -362,7 +720,7 @@ def test_repeated_step_stops_at_max_iterations() -> None:
 
 def test_repeated_step_stops_at_max_duration(monkeypatch) -> None:
     service = build_service(dump_sequence=_changing_dumps(50))
-    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_duration_seconds": 1}})
+    step = make_step(action_type="scroll_down", params_json={"repeat": {"max_duration_seconds": 1}})
 
     clock = {"value": 0.0}
 
@@ -378,11 +736,29 @@ def test_repeated_step_stops_at_max_duration(monkeypatch) -> None:
     assert result["iterations_run"] >= 1
 
 
+def test_repeated_step_ignores_foreign_package_noise_when_detecting_no_new_content() -> None:
+    # issue #47: a status-bar clock (or any other foreign-package node) changing every dump would
+    # otherwise make the fingerprint differ on every single iteration even though the app's own
+    # content genuinely stopped changing, so "no_new_content" would never trigger, running until
+    # max_iterations/max_duration_seconds instead
+    dumps = [
+        [{"text": "same content", "package_name": "com.test.testapp"}, {"text": f"{9 + i}:0{i} PM", "resource_id": "clock", "package_name": "com.android.systemui"}]
+        for i in range(5)
+    ]
+    service = build_service(dump_sequence=dumps)
+    step = make_step(action_type="scroll_down", package_name="com.test.testapp", params_json={"repeat": {"max_iterations": 50}})
+
+    result = service.run_step(step)
+
+    assert result["stop_reason"] == "no_new_content"
+    assert result["iterations_run"] == 2  # one iteration to see it, one more to confirm it repeated
+
+
 def test_repeated_step_stops_when_content_stops_changing() -> None:
     # 3 distinct dumps, then it "settles" and keeps returning the last one forever: it takes one
     # extra iteration past the last distinct dump to actually notice the fingerprint repeated
     service = build_service(dump_sequence=_changing_dumps(3))
-    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_iterations": 50}})
+    step = make_step(action_type="scroll_down", params_json={"repeat": {"max_iterations": 50}})
 
     result = service.run_step(step)
 
@@ -394,7 +770,7 @@ def test_repeated_step_stops_when_content_stops_changing() -> None:
 def test_repeated_step_respects_execution_window_already_closed() -> None:
     service = build_service(dump_sequence=_changing_dumps(10))
     step = make_step(
-        action_type="scroll_up",
+        action_type="scroll_down",
         params_json={"repeat": {"max_iterations": 5, "execution_window_start": "00:00:00", "execution_window_end": "00:00:01"}},
     )
 
@@ -407,7 +783,7 @@ def test_repeated_step_respects_execution_window_already_closed() -> None:
 
 def test_step_without_repeat_config_runs_exactly_once() -> None:
     service = build_service()
-    step = make_step(action_type="scroll_up")
+    step = make_step(action_type="scroll_down")
 
     result = service.run_step(step)
 
@@ -505,6 +881,32 @@ def test_navigate_walks_direct_path_and_records_route_performance() -> None:
         assert transition_perf is not None
         assert transition_perf.sample_count == 1
         assert transition_perf.success_count == 1
+
+
+def test_navigate_logs_the_chosen_strategy_and_each_edge_attempted(caplog) -> None:
+    # issue #40's system-wide follow-up to #38: gap-bridging decisions narrated at debug level
+    # too, not just the mapper's own exploration
+    caplog.set_level("DEBUG")
+    with SessionLocal() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        mapper_session = repository.create_session(package_name="com.navigatelog.testapp", mode=MapperMode.LIGHT, skip_dangerous_actions=True, max_depth=3, max_actions=20, max_scrolls=0)
+        root = repository.create_screen(session_id=mapper_session.id, fingerprint="root", screen_key="root", depth=0, ordinal=0)
+        target = repository.create_screen(session_id=mapper_session.id, fingerprint="target", screen_key="target", depth=1, ordinal=1)
+        node = repository.create_node(screen_id=root.id, node_key="node", text="Go", clickable=True, bounds="[0,0][10,10]")
+        action = repository.create_action(session_id=mapper_session.id, screen_id=root.id, node_id=node.id, action_key="click:go", action_type="click", label="Go", safety=MapperActionSafety.SAFE)
+        repository.create_transition(session_id=mapper_session.id, from_screen_id=root.id, action_id=action.id, to_screen_id=target.id, result_type="clicked")
+        session.commit()
+        session_id, root_id, target_id = mapper_session.id, root.id, target.id
+
+    service = build_service()
+    service.navigate(
+        package_name="com.navigatelog.testapp", session_id=session_id, current_screen_id=root_id, target_screen_id=target_id,
+        restart_option=RestartOption(root_screen_id=root_id, ancestor_step_ids=[]), restart_steps=[],
+    )
+
+    messages = [record.message for record in caplog.records]
+    assert any("Route planner chose direct_path" in message for message in messages)
+    assert any("bounds=[0,0][10,10]" in message and "success=True" in message for message in messages)
 
 
 def test_navigate_restarts_and_replays_ancestor_steps_when_no_direct_path_exists() -> None:

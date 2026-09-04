@@ -51,3 +51,33 @@ def test_execute_action_endpoint_returns_400_on_invalid_request(monkeypatch) -> 
     response = client.post("/device/actions", json={"package_name": "com.device.testapp"})
 
     assert response.status_code == 400
+
+
+class FakeOnDemandService:
+    def start_app(self, package_name: str):
+        return {"package_name": package_name, "started": True}
+
+
+class FailingOnDemandService:
+    def start_app(self, package_name: str):
+        raise RuntimeError("adb device not found")
+
+
+def test_mapper_start_endpoint_returns_service_payload(monkeypatch) -> None:
+    monkeypatch.setattr("lib.presentation.api.routes.mapper.get_mapper_on_demand_service", lambda: FakeOnDemandService())
+    client = TestClient(create_api_app())
+
+    response = client.post("/mapper/apps/com.device.testapp/start")
+
+    assert response.status_code == 200
+    assert response.json() == {"package_name": "com.device.testapp", "started": True}
+
+
+def test_mapper_start_endpoint_returns_503_on_runtime_failure(monkeypatch) -> None:
+    monkeypatch.setattr("lib.presentation.api.routes.mapper.get_mapper_on_demand_service", lambda: FailingOnDemandService())
+    client = TestClient(create_api_app())
+
+    response = client.post("/mapper/apps/com.device.testapp/start")
+
+    assert response.status_code == 503
+    assert "Unable to start com.device.testapp" in response.json()["detail"]

@@ -51,7 +51,7 @@ class LinkedInAdapter:
             dump_result = self.flow_execution_service.run_step(self._transient_step("dump_nodes"))
             all_nodes.extend(dump_result.get("nodes") or [])
             if index < scrolls:
-                self.flow_execution_service.run_step(self._transient_step("scroll_up"))
+                self.flow_execution_service.run_step(self._transient_step("scroll_down"))
 
         deduped_nodes = list(OrderedDict((self._node_key(node), node) for node in all_nodes).values())
         visible_texts = self._collect_texts(deduped_nodes)

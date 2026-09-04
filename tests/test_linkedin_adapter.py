@@ -35,7 +35,7 @@ class FakeFlowExecutionService:
         if step.action_type == "dump_nodes":
             nodes = self._dump_results.pop(0) if self._dump_results else []
             return {"success": True, "node_count": len(nodes), "nodes": nodes}
-        if step.action_type == "scroll_up":
+        if step.action_type in {"scroll_up", "scroll_down"}:
             return {"success": True}
         if step.action_type == "screenshot":
             return {"success": True, "screenshot_path": "linkedin_profile_basic.png"}
@@ -94,8 +94,8 @@ def test_extract_profile_basic_resets_app_and_runs_entrypoint_flow(monkeypatch) 
 
     assert result["profile_opened"] is True
     assert adapter.navigation_context.prepared == ["com.linkedin.android"]
-    # entrypoint click, then 3 dump_nodes interleaved with 2 scroll_up (default scrolls=2)
-    assert flow_execution_service.calls == ["click_first_match", "dump_nodes", "scroll_up", "dump_nodes", "scroll_up", "dump_nodes"]
+    # entrypoint click, then 3 dump_nodes interleaved with 2 scroll_down (default scrolls=2)
+    assert flow_execution_service.calls == ["click_first_match", "dump_nodes", "scroll_down", "dump_nodes", "scroll_down", "dump_nodes"]
     assert result["ocr_lines"] == []
     assert result["visible_texts"] == ["Jane Doe"]
 

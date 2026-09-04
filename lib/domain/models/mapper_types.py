@@ -23,6 +23,26 @@ class MapperActionSafety(str, Enum):
     DANGEROUS = "dangerous"
 
 
+class MapperScreenCompletionState(str, Enum):
+    PENDING = "pending"
+    CONTENT_COMPLETE = "content_complete"
+    RESUME_NEEDED = "resume_needed"
+    COMPLETE = "complete"
+
+
+class MapperChurnMode(str, Enum):
+    OBSERVE = "observe"
+    RECOMMEND = "recommend"
+    ACT = "act"
+
+
+class MapperChurnSeverity(str, Enum):
+    HEALTHY = "healthy"
+    WATCH = "watch"
+    ELEVATED = "elevated"
+    CRITICAL = "critical"
+
+
 class MapperFlowFailureType(str, Enum):
     """Interaction failures only (issue #21): the map's selector didn't match reality anymore.
     Not a log of every step outcome, success and safety-skips are never recorded here."""
@@ -36,6 +56,9 @@ class MapperFlowFailureType(str, Enum):
 @dataclass(frozen=True)
 class MapperLimits:
     max_depth: int
+    # a real per-mode coverage limit for light/medium (deliberately partial sweeps); for deep
+    # it's set so high (MapperModeService.DEEP_ACTIONS_CEILING) it is never the actual reason
+    # exploration stops, deep only stops once there's genuinely nothing new left (issue #36)
     max_actions: int
     max_scrolls: int
     # how many consecutive scrolls with zero newly discovered nodes before giving up on a screen

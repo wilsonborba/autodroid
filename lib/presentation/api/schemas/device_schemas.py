@@ -20,8 +20,17 @@ class DeviceActionRequest(BaseModel):
     )
     action_type: str | None = Field(
         default=None,
-        description="One of click, click_first_match, click_bounds, type_text, scroll_up, back, "
-        "wait, dump_nodes, screenshot, ocr_extract. Runs against whatever's on screen. "
+        description="One of click, click_first_match, click_bounds, long_click_bounds, "
+        "swipe_bounds, type_text, swipe_up, swipe_down, scroll_up, scroll_down, back, home, "
+        "enter, keyevent, wait, dump_nodes, screenshot, ocr_extract. `swipe_up`/`swipe_down` are "
+        "raw finger gestures; `scroll_down` reveals lower content (implemented as an upward "
+        "finger swipe), and `scroll_up` reveals earlier content (implemented as a downward "
+        "finger swipe). `long_click_bounds` and `swipe_bounds` are a touchscreen's equivalent of "
+        "a right-click/drag (there's no left/right mouse button on Android): a press-and-hold or "
+        "a directional swipe anchored to one exact element instead of the whole screen, for "
+        "gestures an app only recognizes when they start on a specific element (open a message's "
+        "context menu, swipe a message sideways to reply, ...). Runs against whatever's on "
+        "screen. "
         "Mutually exclusive with target_action_id.",
     )
     target_screen_id: int | None = Field(
@@ -32,8 +41,13 @@ class DeviceActionRequest(BaseModel):
     selector: dict[str, Any] | None = Field(
         default=None,
         description="Shape depends on action_type: click wants {\"candidates\": [str, ...]}, "
-        "click_bounds wants {\"bounds\": \"[x1,y1][x2,y2]\"}, type_text wants {\"text\": str, "
-        "\"clear\": bool} (typed into whatever is currently focused), the rest ignore this field.",
+        "click_bounds and long_click_bounds want {\"bounds\": \"[x1,y1][x2,y2]\"} "
+        "(long_click_bounds also accepts an optional \"duration\" in seconds, default 0.8), "
+        "swipe_bounds wants {\"bounds\": \"[x1,y1][x2,y2]\", \"direction\": \"left\"|\"right\"|"
+        "\"up\"|\"down\", \"distance\": int} (distance in pixels, optional, defaults to the "
+        "element's own size along that axis capped between 150 and 400), type_text wants "
+        "{\"text\": str, \"clear\": bool} (typed into whatever is currently focused), keyevent "
+        "wants {\"keycode\": str} such as \"KEYCODE_ENTER\", the rest ignore this field.",
     )
     params: dict[str, Any] | None = Field(
         default=None,
@@ -62,3 +76,4 @@ class DeviceActionResponse(BaseModel):
         default=None,
         description="Set by ocr_extract: [{\"text\": ..., \"bounds\": \"[x1,y1][x2,y2]\"}, ...], one per detected text region.",
     )
+    clipboard_text: str | None = Field(default=None, description="Set by clipboard_get: the device clipboard's current text.")

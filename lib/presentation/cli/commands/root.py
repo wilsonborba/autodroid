@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import os
+
 import json
+import sys
+import time as time_module
 from datetime import datetime, time
+from pathlib import Path
 
 import typer
-from alembic import command
-from alembic.config import Config
 
-from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_session, get_settings
-from lib.core.logs import LogTarget, configure_logging
+from lib.bootstrap import create_dispatcher, create_api_app, get_mapper_export_service, get_registry, get_session, get_settings
+from lib.core.logs import LogTarget, configure_logging, get_logger
+from lib.core.net import clear_api_state, find_available_port, is_port_available, write_api_state
 from lib.dal.local.mapper_flow_repository import SqlAlchemyMapperFlowRepository
 from lib.dal.local.mapper_repository import SqlAlchemyMapperRepository
 from lib.domain.models.mapper_types import MapperActionSafety, MapperMode, MapperRunConfig, MapperSessionStatus
 from lib.domain.services.job_queue_service import JobQueueService
+from lib.domain.services.mapper_churn_service import MapperChurnService
 from lib.domain.services.mapper_flow_execution_service import MapperFlowExecutionService
 from lib.domain.services.mapper_flow_service import MapperFlowService
+from lib.domain.services.mapper_on_demand_service import MapperOnDemandService
+from lib.domain.services.mapper_progress_service import MapperProgressService
 from lib.domain.services.ui_mapper_service import UiMapperService
 from lib.domain.services.worker_service import WorkerService
 from lib.presentation.cli.formatters.job_formatter import JobFormatter
@@ -34,9 +41,23 @@ mapper_app.add_typer(flow_app, name="flow")
 
 
 @app.callback()
-def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable detailed CLI logs")) -> None:
+def main(ctx: typer.Context, verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable detailed CLI logs")) -> None:
     settings = get_settings()
-    configure_logging(debug=settings.debug, verbose=verbose, target=LogTarget.CLI)
+    configure_logging(debug=settings.debug, verbose=verbose, target=LogTarget.CLI, log_file=settings.log_file)
+
+    # every CLI invocation, not just the mapper (issue #40's system-wide follow-up to #38): a
+    # nested subcommand's own arguments aren't resolved yet at this point, sys.argv is what
+    # actually captures the full command regardless of how deep the subcommand nesting goes
+    logger = get_logger("lib.presentation.cli")
+    invocation = " ".join(sys.argv[1:])
+    started_at = time_module.monotonic()
+    logger.debug("CLI invoked: %s", invocation)
+
+    def _log_completion() -> None:
+        duration_ms = (time_module.monotonic() - started_at) * 1000
+        logger.debug("CLI finished: %s (%.0fms)", invocation, duration_ms)
+
+    ctx.call_on_close(_log_completion)
 
 
 def _parse_json_payload(raw: str | None) -> dict:
@@ -129,6 +150,27 @@ def reprioritize_job(job_id: int, priority: int) -> None:
         typer.echo(JobFormatter.format(job))
 
 
+@jobs_app.command("force-stop")
+def force_stop_job(job_id: int) -> None:
+    """Unlike `cancel`, actually kills a RUNNING job's subprocess (SIGKILL), no need to stop
+    the autodroid-worker service itself. Pending/scheduled jobs are just cancelled outright."""
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        job = queue.force_stop_job(job_id)
+        typer.echo(JobFormatter.format(job))
+
+
+@jobs_app.command("delete")
+def delete_job(job_id: int) -> None:
+    """Force-stops the job first, then removes it (and its events) from the database."""
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        queue.delete_job(job_id)
+        typer.echo(f"job {job_id} deleted")
+
+
 @worker_app.command("run")
 def run_worker(iterations: int | None = typer.Option(None, help="Run dispatcher loop N times")) -> None:
     dispatcher = create_dispatcher()
@@ -136,6 +178,28 @@ def run_worker(iterations: int | None = typer.Option(None, help="Run dispatcher 
         typer.echo(JsonOutput.render(dispatcher.run_once()))
         return
     dispatcher.run_loop(iterations=iterations)
+
+
+@worker_app.command("run-claimed-job", hidden=True)
+def run_claimed_job(job_id: int) -> None:
+    """Internal: runs one already-claimed job's real runner in this subprocess. Spawned by the
+    dispatcher (lib/domain/services/subprocess_job_runner.py) so force-stopping this one job
+    means killing this process, never the dispatcher/worker service itself. Not meant to be
+    invoked by hand."""
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        job = queue.get_job(job_id)
+        if job is None:
+            typer.echo(f"job {job_id} not found", err=True)
+            raise typer.Exit(code=1)
+        runner = get_registry().get_runner(job.job_type)
+        try:
+            result = runner(job)
+        except Exception as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(JsonOutput.render(result))
 
 
 @worker_app.command("status")
@@ -155,22 +219,146 @@ def worker_status(as_json: bool = False) -> None:
         typer.echo(str(payload))
 
 
+# absolute, anchored to this file's location, not the caller's cwd: a plain "lib/dal/alembic.ini"
+# only resolves when invoked from the repo root, and `autodroid` is a console script meant to
+# work from anywhere, same category of bug as running bare `alembic` from inside lib/dal/ (its
+# env.py does `from lib.dal.local.database import ...`, which needs the repo root on sys.path,
+# not just alembic.ini found).
+ALEMBIC_INI_PATH = str(Path(__file__).resolve().parents[4] / "lib" / "dal" / "alembic.ini")
+
+
+def _alembic_config():
+    # local import (like `command` in every db_* command below): alembic logs a page of "setup
+    # plugin alembic.autogenerate.*" INFO lines as a side effect of merely being imported, and
+    # every `autodroid` invocation, not just `db` subcommands, used to pay for that because this
+    # module is shared by all of them. Deferring the import to here means `serve-api`, `jobs`,
+    # `worker` etc. never touch alembic at all.
+    from alembic.config import Config
+
+    return Config(ALEMBIC_INI_PATH)
+
+
 @db_app.command("upgrade")
 def db_upgrade(revision: str = "head") -> None:
-    command.upgrade(Config("alembic.ini"), revision)
+    from alembic import command
+
+    command.upgrade(_alembic_config(), revision)
     typer.echo(f"Database upgraded to {revision}")
 
 
+@db_app.command("downgrade")
+def db_downgrade(revision: str) -> None:
+    from alembic import command
+
+    command.downgrade(_alembic_config(), revision)
+    typer.echo(f"Database downgraded to {revision}")
+
+
 @db_app.command("revision")
-def db_revision(message: str) -> None:
-    command.revision(Config("alembic.ini"), message=message, autogenerate=True)
+def db_revision(message: str, autogenerate: bool = True) -> None:
+    from alembic import command
+
+    command.revision(_alembic_config(), message=message, autogenerate=autogenerate)
 
 
-@worker_app.command("serve-api")
-def serve_api(host: str = "127.0.0.1", port: int = 8000) -> None:
+@db_app.command("current")
+def db_current(verbose: bool = False) -> None:
+    from alembic import command
+
+    command.current(_alembic_config(), verbose=verbose)
+
+
+@db_app.command("history")
+def db_history(rev_range: str | None = None, verbose: bool = False) -> None:
+    from alembic import command
+
+    command.history(_alembic_config(), rev_range=rev_range, verbose=verbose, indicate_current=True)
+
+
+@db_app.command("heads")
+def db_heads(verbose: bool = False) -> None:
+    from alembic import command
+
+    command.heads(_alembic_config(), verbose=verbose)
+
+
+@db_app.command("branches")
+def db_branches(verbose: bool = False) -> None:
+    from alembic import command
+
+    command.branches(_alembic_config(), verbose=verbose)
+
+
+@db_app.command("show")
+def db_show(revision: str) -> None:
+    from alembic import command
+
+    command.show(_alembic_config(), revision)
+
+
+@db_app.command("stamp")
+def db_stamp(revision: str, purge: bool = False) -> None:
+    from alembic import command
+
+    command.stamp(_alembic_config(), revision, purge=purge)
+    typer.echo(f"Database stamped at {revision}")
+
+
+@db_app.command("check")
+def db_check() -> None:
+    # raises (alembic.util.exc.AutogenerateDiffsDetected / CommandError) when the models and the
+    # latest migration are out of sync, or no revision exists yet; Typer surfaces that as a
+    # non-zero exit, which is the point of this one being scriptable in CI
+    from alembic import command
+
+    command.check(_alembic_config())
+    typer.echo("Database schema matches the models")
+
+
+DEFAULT_API_PORT = 8000
+
+
+@app.command("serve-api")
+def serve_api(
+    host: str = "127.0.0.1",
+    port: int | None = typer.Option(None, help="Port to bind. Given explicitly: used as-is, fails loudly if it's taken. Omitted: an available port is found automatically starting from 8000, and reported."),
+    allow_dangerous_actions: bool = typer.Option(False, "--allow-dangerous-actions", help="Disables the dangerous-action blocker for this API process only. Off by default; use only for explicit supervised runs."),
+) -> None:
+    """Starts the FastAPI/uvicorn server. A top-level command, not under `worker`: the API
+    server and the worker/dispatcher (`worker run`) are two separate processes the user runs
+    side by side, and this one never touches the dispatcher, so it shouldn't read as if it did.
+
+    Writes the resolved host/port to a local state file so anything that needs to reach this API
+    later can read it instead of guessing or scanning ports blind (issue #44).
+    """
     import uvicorn
 
-    uvicorn.run(create_api_app(), host=host, port=port)
+    if allow_dangerous_actions:
+        os.environ["AUTODROID_ALLOW_DANGEROUS_ACTIONS"] = "true"
+        get_settings.cache_clear()
+
+    settings = get_settings()
+    if port is not None:
+        # explicit port: used as requested, never silently swapped for another one. A static
+        # port is usually pinned on purpose (a fixed value other tooling already points at), so
+        # failing loudly here is the correct behavior, not searching around it (issue #45).
+        if not is_port_available(host, port):
+            typer.echo(f"Port {port} is already in use.")
+            raise typer.Exit(code=1)
+        resolved_port = port
+    else:
+        # no port given: this is the only case where auto-discovery applies.
+        resolved_port = find_available_port(host, DEFAULT_API_PORT)
+        typer.echo(f"No port specified, using {resolved_port}")
+
+    write_api_state(settings.api_state_file, host=host, port=resolved_port)
+    typer.echo(f"Starting autodroid API on http://{host}:{resolved_port} (state: {settings.api_state_file})")
+    if settings.allow_dangerous_actions:
+        typer.echo("Dangerous action blocker disabled for this API process (--allow-dangerous-actions)")
+    try:
+        uvicorn.run(create_api_app(), host=host, port=resolved_port)
+    finally:
+        clear_api_state(settings.api_state_file)
 
 
 @mapper_app.command("run")
@@ -192,6 +380,39 @@ def run_mapper(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(JsonOutput.render(result))
+
+
+@mapper_app.command("apps")
+def list_mapper_apps(as_json: bool = False) -> None:
+    payload = {"packages": MapperOnDemandService(get_settings()).list_packages()}
+    if as_json:
+        typer.echo(JsonOutput.render(payload))
+        return
+    for package_name in payload["packages"]:
+        typer.echo(package_name)
+
+
+@mapper_app.command("inspect")
+def inspect_mapper_screen(package_name: str, session_id: int | None = None, as_json: bool = False) -> None:
+    payload = MapperOnDemandService(get_settings()).inspect(package_name, session_id=session_id)
+    if as_json:
+        typer.echo(JsonOutput.render(payload))
+        return
+    typer.echo(f"session #{payload['session_id']} screen #{payload['screen_id']} {payload['screen_key']}")
+    for candidate in payload['candidates'][:20]:
+        typer.echo(f"  action #{candidate['action_id']} {candidate['label']!r} bounds={candidate['bounds']}")
+
+
+@mapper_app.command("act")
+def act_mapper_on_demand(package_name: str, session_id: int | None = None, action_id: int | None = None, action_type: str = "click", selector: str = "{}", params: str | None = None, as_json: bool = False) -> None:
+    payload = MapperOnDemandService(get_settings()).act(
+        package_name, session_id=session_id, action_id=action_id, action_type=action_type,
+        selector=json.loads(selector), params=json.loads(params) if params else None,
+    )
+    if as_json:
+        typer.echo(JsonOutput.render(payload))
+        return
+    typer.echo(str(payload))
 
 
 @mapper_app.command("sessions")
@@ -228,6 +449,49 @@ def show_mapper_session(session_id: int, as_json: bool = False) -> None:
         typer.echo(str(payload))
 
 
+@mapper_app.command("progress")
+def show_mapper_progress(session_id: int | None = None, package_name: str | None = typer.Option(None, "--package"), as_json: bool = False) -> None:
+    with get_session() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        resolved_session_id = _resolve_mapper_session_id(repository, session_id, package_name)
+        progress = MapperProgressService(session)
+        payload = progress.get_session_progress(resolved_session_id)
+        screens = progress.list_screen_progress(resolved_session_id)
+        payload["screens"] = screens[:10]
+        if as_json:
+            typer.echo(JsonOutput.render(payload))
+            return
+        typer.echo(f"session #{payload['session_id']} {payload['package_name']} [{payload['mode']}] status={payload['status']} progress={payload['progress_percent']}%")
+        activity = payload.get('current_activity') or {}
+        if activity:
+            typer.echo(f"  activity={activity.get('activity_kind')} current={activity.get('current_screen_id')} target={activity.get('target_screen_id')} strategy={activity.get('strategy_type')}")
+        typer.echo(f"  screens total={payload['screen_counts']['total']} pending={payload['screen_counts']['pending']} resume_needed={payload['screen_counts']['resume_needed']} complete={payload['screen_counts']['complete']}")
+        recovery = payload.get('recovery_counts') or {}
+        typer.echo(f"  recoveries total={recovery.get('total', 0)} restart={recovery.get('restart', 0)} planner_restart={recovery.get('planner_restart', 0)} planner_direct={recovery.get('planner_direct', 0)} known_return={recovery.get('known_return', 0)}")
+        for item in screens[:10]:
+            marker = '*' if item['is_current_target'] else '-'
+            typer.echo(f"  {marker} screen #{item['screen_id']} {item['screen_key']} depth={item['depth']} state={item['completion_state']} progress={item['progress_percent']}% pending={item['pending_candidates']} scrolls={item['scroll_attempts']}/{item['useful_scroll_discoveries']}")
+
+
+@mapper_app.command("churn")
+def show_mapper_churn(session_id: int | None = None, package_name: str | None = typer.Option(None, "--package"), as_json: bool = False) -> None:
+    with get_session() as session:
+        repository = SqlAlchemyMapperRepository(session)
+        resolved_session_id = _resolve_mapper_session_id(repository, session_id, package_name)
+        payload = MapperChurnService(session, get_settings()).get_live_churn(resolved_session_id)
+        if as_json:
+            typer.echo(JsonOutput.render(payload))
+            return
+        typer.echo(f"session #{payload['session_id']} churn={payload['severity']} score={payload['score']} confidence={payload['confidence']}")
+        activity = payload.get('current_activity') or {}
+        if activity:
+            typer.echo(f"  activity={activity.get('activity_kind')} current={activity.get('current_screen_id')} target={activity.get('target_screen_id')} strategy={activity.get('strategy_type')}")
+        metrics = payload.get('metrics') or {}
+        typer.echo(f"  restarts={metrics.get('window_restarts', 0)} recoveries={metrics.get('window_recoveries', 0)} revisits={metrics.get('window_revisits', 0)} value_gain={metrics.get('window_value_gain', 0)} clicks_since_progress={metrics.get('current_clicks_since_progress', 0)}")
+        for recommendation in payload.get('recommendations', [])[:3]:
+            typer.echo(f"  -> {recommendation['action']} target={recommendation.get('target_screen_id')} confidence={recommendation['confidence']} reason={recommendation['rationale']}")
+
+
 @mapper_app.command("export")
 def export_mapper_session(session_id: int) -> None:
     output_dir = get_settings().output_dir / "mappers"
@@ -245,6 +509,17 @@ def _screen_summary_payload(screen) -> dict:
         "visit_count": screen.visit_count,
         "node_count": len(screen.nodes),
     }
+
+
+def _resolve_mapper_session_id(repository: SqlAlchemyMapperRepository, session_id: int | None, package_name: str | None) -> int:
+    if session_id is not None:
+        return session_id
+    if not package_name:
+        raise typer.BadParameter("provide a session_id or use --package")
+    mapper_session = repository.get_resumable_session(package_name) or repository.get_latest_session(package_name)
+    if mapper_session is None:
+        raise typer.BadParameter(f"No mapper session found for package {package_name}")
+    return mapper_session.id
 
 
 @mapper_app.command("screens")

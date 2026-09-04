@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+import os
+import signal
+import time as time_module
+from datetime import datetime, time, timezone
 from typing import Any
 
 from croniter import croniter
@@ -87,6 +90,52 @@ class JobQueueService:
             self.record_event(job.id, "cancel_requested", "Cooperative cancellation requested", None)
         return job
 
+    def force_stop_job(self, job_id: int) -> Job:
+        """Unlike cancel_job, this actually kills a RUNNING job's subprocess (issue: force-stop
+        without stopping the whole worker service) instead of just requesting cooperative
+        cancellation. The dispatcher runs each job in its own subprocess and records its pid on
+        the job row precisely so this can target just that one process (lib/domain/services/
+        subprocess_job_runner.py). Killing it makes proc.wait() in the parent return non-zero,
+        which the dispatcher turns into mark_failed(); cancel_requested being set here is what
+        makes mark_failed() record it as CANCELLED rather than FAILED."""
+        job = self._require_job(job_id)
+        if job.status == JobStatus.RUNNING:
+            job.cancel_requested = True
+            if job.pid:
+                try:
+                    os.kill(job.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.record_event(job.id, "job_force_stopped", f"SIGKILL sent to pid {job.pid}", None)
+            else:
+                self.record_event(job.id, "job_force_stopped", "No pid recorded, requested cancellation only", None)
+        elif job.status in {JobStatus.PENDING, JobStatus.SCHEDULED, JobStatus.PAUSED}:
+            job.status = JobStatus.CANCELLED
+            job.finished_at = utc_now()
+            self.record_event(job.id, "job_cancelled", "Job cancelled before execution", None)
+        return job
+
+    def delete_job(self, job_id: int, stop_wait_timeout_seconds: float = 5.0) -> None:
+        """Force-stops the job first (issue: delete should never leave a subprocess running
+        unsupervised), then removes the row. job_events cascades via ON DELETE CASCADE;
+        worker_states.current_job_id is ON DELETE SET NULL.
+
+        If it was RUNNING, the SIGKILL lands in a different OS process (the dispatcher's job
+        subprocess); this waits briefly for that dispatcher process to notice proc.wait() return
+        and finalize the row (mark_failed(), which sees cancel_requested and marks CANCELLED)
+        before deleting it out from under that in-flight finalization. mark_completed/mark_failed
+        tolerate the row already being gone if this still races past the timeout."""
+        job = self.force_stop_job(job_id)
+        if job.status == JobStatus.RUNNING:
+            self.session.commit()
+            deadline = time_module.monotonic() + stop_wait_timeout_seconds
+            while job.status == JobStatus.RUNNING and time_module.monotonic() < deadline:
+                time_module.sleep(0.2)
+                self.session.expire_all()
+                job = self._require_job(job_id)
+        self.session.delete(job)
+        self.session.flush()
+
     def claim_next_job(self) -> Job | None:
         now = utc_now()
         stmt = (
@@ -108,8 +157,34 @@ class JobQueueService:
             return job
         return None
 
-    def mark_completed(self, job_id: int, result: dict[str, Any]) -> Job:
-        job = self._require_job(job_id)
+    def reconcile_orphaned_running_jobs(self) -> int:
+        """A job left RUNNING when its worker process dies mid-run (Ctrl+C, crash) is orphaned
+        (issue #49): since #46 the claim commits immediately rather than sitting in the same
+        open transaction as the whole job, it survives the process's death, but nothing is
+        actually working on it anymore, and claim_next_job() only ever looks at PENDING/
+        SCHEDULED, so it would otherwise sit stuck forever, invisible to a freshly restarted
+        worker. A dispatcher that just started can't have anything genuinely in flight yet, so
+        every RUNNING job found at that point is safely orphaned. Resets it to SCHEDULED
+        (immediately due) without touching attempt_count again, claim_next_job() already
+        increments that on the next pickup."""
+        stmt = select(Job).where(Job.status == JobStatus.RUNNING)
+        orphaned = list(self.session.scalars(stmt))
+        for job in orphaned:
+            job.status = JobStatus.SCHEDULED
+            job.run_after = utc_now()
+            self.record_event(job.id, "job_orphan_reconciled", "Reset from RUNNING to SCHEDULED: left running by a previous dispatcher that died mid-job", None)
+            self.logger.warning("Job %s was left RUNNING by a previous dispatcher, reset to SCHEDULED", job.id)
+        return len(orphaned)
+
+    def mark_completed(self, job_id: int, result: dict[str, Any]) -> Job | None:
+        job = self.get_job(job_id)
+        if job is None:
+            # deleted (DELETE /jobs/{id} force-stops then deletes) while its subprocess was
+            # still exiting: the dispatcher process that spawned it only finds out once
+            # proc.wait() returns, by which point there's nothing left to finalize
+            self.logger.warning("mark_completed: job %s no longer exists, skipping", job_id)
+            return None
+        job.pid = None
         job.status = JobStatus.COMPLETED
         job.result_json = result
         job.finished_at = utc_now()
@@ -118,8 +193,12 @@ class JobQueueService:
         self._enqueue_next_recurring_run(job)
         return job
 
-    def mark_failed(self, job_id: int, error_message: str) -> Job:
-        job = self._require_job(job_id)
+    def mark_failed(self, job_id: int, error_message: str) -> Job | None:
+        job = self.get_job(job_id)
+        if job is None:
+            self.logger.warning("mark_failed: job %s no longer exists, skipping", job_id)
+            return None
+        job.pid = None
         if job.cancel_requested:
             job.status = JobStatus.CANCELLED
             self.record_event(job.id, "job_cancelled", "Job cancelled during execution", None)
@@ -157,7 +236,16 @@ class JobQueueService:
         )
 
     def _is_due(self, job: Job, now: datetime) -> bool:
-        return job.run_after is None or job.run_after <= now
+        # SQLite has no native timezone-aware datetime type: a job.run_after written as UTC-aware
+        # (utc_now(), always this app's own convention) comes back naive once reloaded from
+        # storage in a fresh session/query, crashing a naive-vs-aware comparison against `now`
+        # (issue #49, found by reconcile_orphaned_running_jobs() setting run_after then a later
+        # claim_next_job() call, in a separate session, comparing it). A naive value here always
+        # means UTC, never local time, so it's safe to just attach that.
+        run_after = job.run_after
+        if run_after is not None and run_after.tzinfo is None:
+            run_after = run_after.replace(tzinfo=timezone.utc)
+        return run_after is None or run_after <= now
 
     def _is_within_execution_window(self, job: Job) -> bool:
         if job.execution_window_start is None or job.execution_window_end is None:

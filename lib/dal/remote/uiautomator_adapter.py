@@ -64,6 +64,21 @@ class UiAutomatorAdapter:
                         return True
         return False
 
+    def click_by_resource_id(self, resource_id: str) -> bool:
+        # resource_id is the stable identifier apps expose for a UI element (issue #18's own
+        # spec called it out as the resilient option, ahead of text/content_desc): a compose bar
+        # or an action button keeps the same resource_id across runs even when the text on it is
+        # dynamic (e.g. Instagram's reply field shows "Reply to <contact>", the contact changes,
+        # the resource_id "reply_bar_edittext" doesn't). Only safe for elements that are unique
+        # on screen; a resource_id shared by every row of a list still needs text/position to
+        # pick one specific row.
+        selector = self.device(resourceId=resource_id)
+        if selector.exists(timeout=1):
+            selector.click()
+            time.sleep(1)
+            return True
+        return False
+
     def dump_nodes(self) -> list[dict[str, Any]]:
         self.logger.debug("Dumping UI hierarchy")
         hierarchy = self.device.dump_hierarchy(compressed=False)
@@ -94,6 +109,54 @@ class UiAutomatorAdapter:
         self.device.swipe_ext("up", scale=0.8)
         time.sleep(1)
 
+    def swipe_down(self) -> None:
+        self.device.swipe_ext("down", scale=0.8)
+        time.sleep(1)
+
+    def _parse_bounds(self, bounds: str) -> tuple[int, int, int, int] | None:
+        try:
+            left_top, right_bottom = bounds.strip('[]').split('][')
+            x1, y1 = [int(value) for value in left_top.split(',')]
+            x2, y2 = [int(value) for value in right_bottom.split(',')]
+            return x1, y1, x2, y2
+        except Exception:
+            self.logger.debug("Unable to parse bounds: %s", bounds)
+            return None
+
+    def swipe_bounds(self, bounds: str, direction: str, distance: int | None = None) -> bool:
+        # a directional swipe anchored to one element's exact "[x1,y1][x2,y2]" region instead of
+        # the whole screen (swipe_up/swipe_down): some gestures only register when they start on
+        # the element itself, e.g. swiping a specific chat message sideways to reveal its reply
+        # action, not just anywhere on screen
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
+            return False
+        x1, y1, x2, y2 = parsed
+        offsets = {"left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}
+        if direction not in offsets:
+            self.logger.debug("Unsupported swipe direction: %s", direction)
+            return False
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        sign_x, sign_y = offsets[direction]
+        span = distance if distance is not None else max(min((x2 - x1) if sign_x else (y2 - y1), 400), 150)
+        self.device.swipe(cx, cy, cx + sign_x * span, cy + sign_y * span, duration=0.2)
+        time.sleep(1)
+        return True
+
+    def long_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        # press-and-hold on an exact "[x1,y1][x2,y2]" region, same target shape as click_bounds:
+        # a touchscreen has no left/right mouse button, this is its equivalent of a right-click,
+        # the gesture most apps use to surface a contextual menu (reply, forward, pin, delete, ...)
+        # on an element instead of activating it. A fixed, decided-in-advance duration: for a
+        # caller-timed hold instead (recording a voice message), see press_hold_start/_release.
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
+            return False
+        x1, y1, x2, y2 = parsed
+        self.device.long_click((x1 + x2) // 2, (y1 + y2) // 2, duration=duration or 0.8)
+        time.sleep(1)
+        return True
+
     def screenshot(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.device.screenshot(str(path))
@@ -113,16 +176,97 @@ class UiAutomatorAdapter:
         return True
 
     def click_bounds(self, bounds: str) -> bool:
-        try:
-            left_top, right_bottom = bounds.strip('[]').split('][')
-            x1, y1 = [int(value) for value in left_top.split(',')]
-            x2, y2 = [int(value) for value in right_bottom.split(',')]
-        except Exception:
-            self.logger.debug("Unable to parse click bounds: %s", bounds)
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
             return False
+        x1, y1, x2, y2 = parsed
         self.device.click((x1 + x2) // 2, (y1 + y2) // 2)
         time.sleep(1)
         return True
 
     def dump_hierarchy_text(self) -> str:
         return self.device.dump_hierarchy(compressed=False)
+
+    def double_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        # two quick taps on the same point, the standard mobile-design gesture for "like" in
+        # social apps (issue #62): distinct from long_click_bounds (one press held down) and from
+        # calling click_bounds twice (uiautomator2's device.double_click controls the gap between
+        # taps itself, calling click() twice from here wouldn't reliably land within the OS's
+        # double-tap window)
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
+            return False
+        x1, y1, x2, y2 = parsed
+        self.device.double_click((x1 + x2) // 2, (y1 + y2) // 2, duration=duration or 0.1)
+        time.sleep(1)
+        return True
+
+    def drag_bounds(self, from_bounds: str, to_bounds: str, duration: float | None = None) -> bool:
+        # press down on one element, move, release on another (issue #62): design taxonomy calls
+        # this "drag" as distinct from "swipe"/"pan", the difference that matters here is drag
+        # has an actual drop target (reordering a list, moving a file into a folder), swipe_bounds
+        # only has a direction and a distance, there's nothing at the far end it's aiming for
+        start = self._parse_bounds(from_bounds)
+        end = self._parse_bounds(to_bounds)
+        if start is None or end is None:
+            return False
+        sx1, sy1, sx2, sy2 = start
+        ex1, ey1, ex2, ey2 = end
+        self.device.drag((sx1 + sx2) // 2, (sy1 + sy2) // 2, (ex1 + ex2) // 2, (ey1 + ey2) // 2, duration=duration or 0.5)
+        time.sleep(1)
+        return True
+
+    def pinch_by_resource_id(self, resource_id: str, *, direction: str, percent: int = 100, steps: int = 50) -> bool:
+        # zoom in/out (issue #62): uiautomator2 only exposes pinch on a selected widget
+        # (`device(...).pinch_in()/.pinch_out()`), not as a raw two-point gesture on bare
+        # coordinates the way click/swipe/drag are, so this one is resource_id-only, no bounds
+        # variant. Only meaningful on a widget that actually handles pinch itself (a photo/map
+        # view), not on arbitrary screen regions.
+        if direction not in ("in", "out"):
+            self.logger.debug("Unsupported pinch direction: %s", direction)
+            return False
+        selector = self.device(resourceId=resource_id)
+        if not selector.exists(timeout=1):
+            return False
+        if direction == "in":
+            selector.pinch_in(percent=percent, steps=steps)
+        else:
+            selector.pinch_out(percent=percent, steps=steps)
+        time.sleep(1)
+        return True
+
+    def get_clipboard(self) -> str:
+        return self.device.clipboard or ""
+
+    def set_clipboard(self, text: str) -> bool:
+        # write-then-paste is how a real user fills a field from clipboard instead of typing
+        # every character (issue #62): type_text (send_keys) always simulates keystrokes, this is
+        # the other half, needed together with a later click on a "Paste" menu item or a
+        # long-press-then-paste sequence
+        try:
+            self.device.set_clipboard(text)
+        except Exception:
+            self.logger.debug("Unable to set clipboard: %r", text)
+            return False
+        return True
+
+    def press_hold_start(self, bounds: str) -> bool:
+        # first half of a caller-controlled press-and-release (issue #62): long_click_bounds only
+        # supports a duration decided in advance, this is for the opposite case, holding a
+        # position until some other condition is met (recording a voice message: hold while
+        # audio captures, release whenever the caller decides to stop, not a fixed 0.8s guess)
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
+            return False
+        x1, y1, x2, y2 = parsed
+        self.device.touch.down((x1 + x2) // 2, (y1 + y2) // 2)
+        return True
+
+    def press_hold_release(self, bounds: str) -> bool:
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
+            return False
+        x1, y1, x2, y2 = parsed
+        self.device.touch.up((x1 + x2) // 2, (y1 + y2) // 2)
+        time.sleep(1)
+        return True

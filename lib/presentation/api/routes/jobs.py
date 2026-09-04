@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 from lib.core.logs import get_logger
 from lib.presentation.api.dependencies import get_session, get_settings
@@ -54,7 +54,15 @@ def list_jobs(limit: int = 50):
         return [JobResponse.model_validate(job, from_attributes=True) for job in jobs]
 
 
-@router.get("/jobs/{job_id}", response_model=JobResponse, summary="Get one job's current status")
+@router.get(
+    "/jobs/{job_id}", response_model=JobResponse, summary="Get one job's current status",
+    description="`status` reflects claim/completion the moment they happen (issue #46), not just "
+    "before/after: poll this mid-run to see it flip from `pending`/`scheduled` to `running`, then "
+    "to `completed`/`failed`. For live progress on a `mapper.remap` job specifically, read "
+    "`payload_json.package_name` and correlate to `GET /mapper/apps/{package_name}/latest-session`: "
+    "the mapper commits each screen as it's found, so `screens_recorded` there grows in real time "
+    "while this job still shows `running`.",
+)
 def get_job(job_id: int):
     settings = get_settings()
     with get_session() as session:
@@ -81,6 +89,43 @@ def cancel_job(job_id: int):
             logger.warning("Cancel failed for job %s: %s", job_id, exc)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return JobResponse.model_validate(job, from_attributes=True)
+
+
+@router.post(
+    "/jobs/{job_id}/force-stop", response_model=JobResponse, summary="Force-stop a job",
+    description="Unlike /cancel, actually kills a RUNNING job's subprocess (SIGKILL) right away, "
+    "with no need to stop the autodroid-worker service itself. Pending/scheduled jobs are just "
+    "cancelled outright, same as /cancel.",
+)
+def force_stop_job(job_id: int):
+    logger.info("POST /jobs/%s/force-stop", job_id)
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        try:
+            job = queue.force_stop_job(job_id)
+        except ValueError as exc:
+            logger.warning("Force-stop failed for job %s: %s", job_id, exc)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JobResponse.model_validate(job, from_attributes=True)
+
+
+@router.delete(
+    "/jobs/{job_id}", status_code=204, summary="Force-stop and delete a job",
+    description="Force-stops the job first (same as /force-stop), waits briefly for a RUNNING "
+    "job's subprocess to actually die, then removes the job and its events from the database.",
+)
+def delete_job(job_id: int):
+    logger.info("DELETE /jobs/%s", job_id)
+    settings = get_settings()
+    with get_session() as session:
+        queue = JobQueueService(session, settings.timezone)
+        try:
+            queue.delete_job(job_id)
+        except ValueError as exc:
+            logger.warning("Delete failed for job %s: %s", job_id, exc)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(status_code=204)
 
 
 @router.post("/jobs/{job_id}/reprioritize", response_model=JobResponse, summary="Change a queued job's priority")

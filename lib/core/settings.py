@@ -14,12 +14,19 @@ class Settings:
     worker_name: str
     queue_poll_interval_seconds: float
     output_dir: Path
+    log_file: Path
+    api_state_file: Path
     app_timezone: str
     android_serial: str
     linkedin_package_name: str
     ocr_language: str
     mapper_auto_remap_enabled: bool
     mapper_auto_remap_threshold: int
+    mapper_churn_mode: str
+    mapper_churn_window_size: int
+    mapper_churn_min_confidence: float
+    mapper_churn_aggressiveness: float
+    allow_dangerous_actions: bool
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -31,14 +38,21 @@ def load_settings() -> Settings:
     return Settings(
         app_name=os.getenv("AUTODROID_APP_NAME", "autodroid"),
         debug=os.getenv("AUTODROID_DEBUG", "false").lower() == "true",
-        database_url=os.getenv("AUTODROID_DATABASE_URL", "sqlite:///./var/autodroid.db"),
+        database_url=os.getenv("AUTODROID_DATABASE_URL", "sqlite:///./lib/dal/var/autodroid.db"),
         worker_name=os.getenv("AUTODROID_WORKER_NAME", "main"),
         queue_poll_interval_seconds=float(os.getenv("AUTODROID_QUEUE_POLL_INTERVAL_SECONDS", "2.0")),
         output_dir=Path(os.getenv("AUTODROID_OUTPUT_DIR", "output")),
+        log_file=Path(os.getenv("AUTODROID_LOG_FILE", "var/logs/autodroid.log")),
+        api_state_file=Path(os.getenv("AUTODROID_API_STATE_FILE", "var/run/api.json")),
         app_timezone=os.getenv("AUTODROID_TIMEZONE", "UTC"),
         android_serial=os.getenv("ANDROID_SERIAL", "127.0.0.1:5555"),
         linkedin_package_name=os.getenv("LINKEDIN_PACKAGE_NAME", "com.linkedin.android"),
         ocr_language=os.getenv("AUTODROID_OCR_LANGUAGE", "en"),
         mapper_auto_remap_enabled=os.getenv("AUTODROID_MAPPER_AUTO_REMAP_ENABLED", "false").lower() == "true",
         mapper_auto_remap_threshold=int(os.getenv("AUTODROID_MAPPER_AUTO_REMAP_THRESHOLD", "3")),
+        mapper_churn_mode=os.getenv("AUTODROID_MAPPER_CHURN_MODE", "recommend"),
+        mapper_churn_window_size=int(os.getenv("AUTODROID_MAPPER_CHURN_WINDOW_SIZE", "8")),
+        mapper_churn_min_confidence=float(os.getenv("AUTODROID_MAPPER_CHURN_MIN_CONFIDENCE", "0.55")),
+        mapper_churn_aggressiveness=float(os.getenv("AUTODROID_MAPPER_CHURN_AGGRESSIVENESS", "0.35")),
+        allow_dangerous_actions=os.getenv("AUTODROID_ALLOW_DANGEROUS_ACTIONS", "false").lower() == "true",
     )
