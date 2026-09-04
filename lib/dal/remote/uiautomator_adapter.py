@@ -113,6 +113,50 @@ class UiAutomatorAdapter:
         self.device.swipe_ext("down", scale=0.8)
         time.sleep(1)
 
+    def _parse_bounds(self, bounds: str) -> tuple[int, int, int, int] | None:
+        try:
+            left_top, right_bottom = bounds.strip('[]').split('][')
+            x1, y1 = [int(value) for value in left_top.split(',')]
+            x2, y2 = [int(value) for value in right_bottom.split(',')]
+            return x1, y1, x2, y2
+        except Exception:
+            self.logger.debug("Unable to parse bounds: %s", bounds)
+            return None
+
+    def swipe_bounds(self, bounds: str, direction: str, distance: int | None = None) -> bool:
+        # a directional swipe anchored to one element's exact "[x1,y1][x2,y2]" region instead of
+        # the whole screen (swipe_up/swipe_down): some gestures only register when they start on
+        # the element itself, e.g. swiping a specific chat message sideways to reveal its reply
+        # action, not just anywhere on screen
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
+            return False
+        x1, y1, x2, y2 = parsed
+        offsets = {"left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}
+        if direction not in offsets:
+            self.logger.debug("Unsupported swipe direction: %s", direction)
+            return False
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        sign_x, sign_y = offsets[direction]
+        span = distance if distance is not None else max(min((x2 - x1) if sign_x else (y2 - y1), 400), 150)
+        self.device.swipe(cx, cy, cx + sign_x * span, cy + sign_y * span, duration=0.2)
+        time.sleep(1)
+        return True
+
+    def long_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        # press-and-hold on an exact "[x1,y1][x2,y2]" region, same target shape as click_bounds:
+        # a touchscreen has no left/right mouse button, this is its equivalent of a right-click,
+        # the gesture most apps use to surface a contextual menu (reply, forward, pin, delete, ...)
+        # on an element instead of activating it. A fixed, decided-in-advance duration: for a
+        # caller-timed hold instead (recording a voice message), see press_hold_start/_release.
+        parsed = self._parse_bounds(bounds)
+        if parsed is None:
+            return False
+        x1, y1, x2, y2 = parsed
+        self.device.long_click((x1 + x2) // 2, (y1 + y2) // 2, duration=duration or 0.8)
+        time.sleep(1)
+        return True
+
     def screenshot(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.device.screenshot(str(path))
@@ -131,36 +175,12 @@ class UiAutomatorAdapter:
         time.sleep(1)
         return True
 
-    def _parse_bounds(self, bounds: str) -> tuple[int, int, int, int] | None:
-        try:
-            left_top, right_bottom = bounds.strip('[]').split('][')
-            x1, y1 = [int(value) for value in left_top.split(',')]
-            x2, y2 = [int(value) for value in right_bottom.split(',')]
-            return x1, y1, x2, y2
-        except Exception:
-            self.logger.debug("Unable to parse bounds: %s", bounds)
-            return None
-
     def click_bounds(self, bounds: str) -> bool:
         parsed = self._parse_bounds(bounds)
         if parsed is None:
             return False
         x1, y1, x2, y2 = parsed
         self.device.click((x1 + x2) // 2, (y1 + y2) // 2)
-        time.sleep(1)
-        return True
-
-    def long_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
-        # press-and-hold on an exact "[x1,y1][x2,y2]" region, same target shape as click_bounds:
-        # a touchscreen has no left/right mouse button, this is its equivalent of a right-click,
-        # the gesture most apps use to surface a contextual menu (reply, forward, pin, delete, ...)
-        # on an element instead of activating it. A fixed, decided-in-advance duration: for a
-        # caller-timed hold instead (recording a voice message), see press_hold_start/_release.
-        parsed = self._parse_bounds(bounds)
-        if parsed is None:
-            return False
-        x1, y1, x2, y2 = parsed
-        self.device.long_click((x1 + x2) // 2, (y1 + y2) // 2, duration=duration or 0.8)
         time.sleep(1)
         return True
 

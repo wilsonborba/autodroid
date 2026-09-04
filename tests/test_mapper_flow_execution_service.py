@@ -81,10 +81,14 @@ class FakeUi:
         self.screenshots: list[str] = []
         self.clicked_bounds: list[str] = []
         self.click_bounds_result = True
-        self.clicked_resource_ids: list[str] = []
-        self.click_by_resource_id_result = True
+        self.swiped_bounds: list[tuple[str, str, int | None]] = []
+        self.swipe_bounds_result = True
+        self.long_clicked_bounds: list[tuple[str, float | None]] = []
+        self.long_click_bounds_result = True
         self.typed_text: list[tuple[str, bool]] = []
         self.type_text_result = True
+        self.clicked_resource_ids: list[str] = []
+        self.click_by_resource_id_result = True
         self.double_clicked_bounds: list[tuple[str, float | None]] = []
         self.double_click_bounds_result = True
         self.dragged_bounds: list[tuple[str, str, float | None]] = []
@@ -133,9 +137,9 @@ class FakeUi:
         self.clicked_bounds.append(bounds)
         return self.click_bounds_result
 
-    def type_text(self, text: str, *, clear: bool = False) -> bool:
-        self.typed_text.append((text, clear))
-        return self.type_text_result
+    def swipe_bounds(self, bounds: str, direction: str, distance: int | None = None) -> bool:
+        self.swiped_bounds.append((bounds, direction, distance))
+        return self.swipe_bounds_result
 
     def double_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
         self.double_clicked_bounds.append((bounds, duration))
@@ -163,6 +167,14 @@ class FakeUi:
     def press_hold_release(self, bounds: str) -> bool:
         self.press_hold_released.append(bounds)
         return self.press_hold_release_result
+
+    def long_click_bounds(self, bounds: str, duration: float | None = None) -> bool:
+        self.long_clicked_bounds.append((bounds, duration))
+        return self.long_click_bounds_result
+
+    def type_text(self, text: str, *, clear: bool = False) -> bool:
+        self.typed_text.append((text, clear))
+        return self.type_text_result
 
 
 class FakeAdb:
@@ -223,6 +235,10 @@ def build_service(dump_sequence: list[list[dict]] | None = None) -> MapperFlowEx
         "click_first_match": service._execute_click_first_match,
         "click_bounds": service._execute_click_bounds,
         "type_text": service._execute_type_text,
+        "swipe_up": service._execute_swipe_up,
+        "swipe_down": service._execute_swipe_down,
+        "swipe_bounds": service._execute_swipe_bounds,
+        "long_click_bounds": service._execute_long_click_bounds,
         "double_click_bounds": service._execute_double_click_bounds,
         "drag_bounds": service._execute_drag_bounds,
         "pinch": service._execute_pinch,
@@ -310,34 +326,54 @@ def test_click_bounds_step_fails_without_bounds() -> None:
     assert service.ui.clicked_bounds == []
 
 
-def test_type_text_step_types_into_the_focused_field() -> None:
+def test_swipe_bounds_step_swipes_from_the_exact_region() -> None:
     service = build_service()
-    step = make_step(action_type="type_text", selector_json={"text": "Congrats on the launch!"})
+    step = make_step(action_type="swipe_bounds", selector_json={"bounds": "[0,0][50,20]", "direction": "left"})
 
     result = service.run_step(step)
 
     assert result["success"] is True
-    assert service.ui.typed_text == [("Congrats on the launch!", False)]
+    assert service.ui.swiped_bounds == [("[0,0][50,20]", "left", None)]
 
 
-def test_type_text_step_passes_clear_flag_through() -> None:
+def test_swipe_bounds_step_passes_an_explicit_distance_through() -> None:
     service = build_service()
-    step = make_step(action_type="type_text", selector_json={"text": "replacement", "clear": True})
+    step = make_step(action_type="swipe_bounds", selector_json={"bounds": "[0,0][50,20]", "direction": "right", "distance": 300})
 
     result = service.run_step(step)
 
     assert result["success"] is True
-    assert service.ui.typed_text == [("replacement", True)]
+    assert service.ui.swiped_bounds == [("[0,0][50,20]", "right", 300)]
 
 
-def test_type_text_step_fails_without_text() -> None:
+def test_swipe_bounds_step_fails_without_bounds_or_direction() -> None:
     service = build_service()
-    step = make_step(action_type="type_text", selector_json={})
+    step = make_step(action_type="swipe_bounds", selector_json={"bounds": "[0,0][50,20]"})
 
     result = service.run_step(step)
 
     assert result["success"] is False
-    assert service.ui.typed_text == []
+    assert service.ui.swiped_bounds == []
+
+
+def test_long_click_bounds_step_presses_the_exact_region() -> None:
+    service = build_service()
+    step = make_step(action_type="long_click_bounds", selector_json={"bounds": "[0,0][50,20]"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.long_clicked_bounds == [("[0,0][50,20]", None)]
+
+
+def test_long_click_bounds_step_fails_without_bounds() -> None:
+    service = build_service()
+    step = make_step(action_type="long_click_bounds", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.long_clicked_bounds == []
 
 
 def test_double_click_bounds_step_taps_twice_at_the_exact_region() -> None:
@@ -442,14 +478,74 @@ def test_press_hold_start_and_release_steps_touch_down_then_up() -> None:
     assert service.ui.press_hold_released == ["[0,0][50,20]"]
 
 
-def test_scroll_down_step_swipes_down() -> None:
+def test_type_text_step_types_into_the_focused_field() -> None:
+    service = build_service()
+    step = make_step(action_type="type_text", selector_json={"text": "Congrats on the launch!"})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.typed_text == [("Congrats on the launch!", False)]
+
+
+def test_type_text_step_passes_clear_flag_through() -> None:
+    service = build_service()
+    step = make_step(action_type="type_text", selector_json={"text": "replacement", "clear": True})
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.typed_text == [("replacement", True)]
+
+
+def test_type_text_step_fails_without_text() -> None:
+    service = build_service()
+    step = make_step(action_type="type_text", selector_json={})
+
+    result = service.run_step(step)
+
+    assert result["success"] is False
+    assert service.ui.typed_text == []
+
+
+def test_scroll_down_step_swipes_up_to_reveal_lower_content() -> None:
     service = build_service()
     step = make_step(action_type="scroll_down")
 
     result = service.run_step(step)
 
     assert result["success"] is True
+    assert service.ui.swipes == 1
+
+
+def test_scroll_up_step_swipes_down_to_reveal_earlier_content() -> None:
+    service = build_service()
+    step = make_step(action_type="scroll_up")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
     assert service.ui.swipes_down == 1
+
+
+def test_swipe_down_step_keeps_raw_gesture_semantics() -> None:
+    service = build_service()
+    step = make_step(action_type="swipe_down")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swipes_down == 1
+
+
+def test_swipe_up_step_keeps_raw_gesture_semantics() -> None:
+    service = build_service()
+    step = make_step(action_type="swipe_up")
+
+    result = service.run_step(step)
+
+    assert result["success"] is True
+    assert service.ui.swipes == 1
 
 
 def test_enter_step_presses_enter() -> None:
@@ -595,7 +691,7 @@ def test_run_flow_executes_all_steps_in_order() -> None:
     flow = MapperFlow(id=1, name="extract_profile", package_name="com.linkedin.android")
     steps = [
         make_step(id=10, action_type="click", selector_json={"candidates": ["Profile"]}),
-        make_step(id=11, action_type="scroll_up"),
+        make_step(id=11, action_type="scroll_down"),
         make_step(id=12, action_type="dump_nodes"),
     ]
 
@@ -613,7 +709,7 @@ def _changing_dumps(count: int) -> list[list[dict]]:
 
 def test_repeated_step_stops_at_max_iterations() -> None:
     service = build_service(dump_sequence=_changing_dumps(20))
-    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_iterations": 5}})
+    step = make_step(action_type="scroll_down", params_json={"repeat": {"max_iterations": 5}})
 
     result = service.run_step(step)
 
@@ -624,7 +720,7 @@ def test_repeated_step_stops_at_max_iterations() -> None:
 
 def test_repeated_step_stops_at_max_duration(monkeypatch) -> None:
     service = build_service(dump_sequence=_changing_dumps(50))
-    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_duration_seconds": 1}})
+    step = make_step(action_type="scroll_down", params_json={"repeat": {"max_duration_seconds": 1}})
 
     clock = {"value": 0.0}
 
@@ -650,7 +746,7 @@ def test_repeated_step_ignores_foreign_package_noise_when_detecting_no_new_conte
         for i in range(5)
     ]
     service = build_service(dump_sequence=dumps)
-    step = make_step(action_type="scroll_up", package_name="com.test.testapp", params_json={"repeat": {"max_iterations": 50}})
+    step = make_step(action_type="scroll_down", package_name="com.test.testapp", params_json={"repeat": {"max_iterations": 50}})
 
     result = service.run_step(step)
 
@@ -662,7 +758,7 @@ def test_repeated_step_stops_when_content_stops_changing() -> None:
     # 3 distinct dumps, then it "settles" and keeps returning the last one forever: it takes one
     # extra iteration past the last distinct dump to actually notice the fingerprint repeated
     service = build_service(dump_sequence=_changing_dumps(3))
-    step = make_step(action_type="scroll_up", params_json={"repeat": {"max_iterations": 50}})
+    step = make_step(action_type="scroll_down", params_json={"repeat": {"max_iterations": 50}})
 
     result = service.run_step(step)
 
@@ -674,7 +770,7 @@ def test_repeated_step_stops_when_content_stops_changing() -> None:
 def test_repeated_step_respects_execution_window_already_closed() -> None:
     service = build_service(dump_sequence=_changing_dumps(10))
     step = make_step(
-        action_type="scroll_up",
+        action_type="scroll_down",
         params_json={"repeat": {"max_iterations": 5, "execution_window_start": "00:00:00", "execution_window_end": "00:00:01"}},
     )
 
@@ -687,7 +783,7 @@ def test_repeated_step_respects_execution_window_already_closed() -> None:
 
 def test_step_without_repeat_config_runs_exactly_once() -> None:
     service = build_service()
-    step = make_step(action_type="scroll_up")
+    step = make_step(action_type="scroll_down")
 
     result = service.run_step(step)
 

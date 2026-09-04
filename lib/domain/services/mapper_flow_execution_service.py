@@ -52,6 +52,9 @@ class MapperFlowExecutionService:
             "click_first_match": self._execute_click_first_match,
             "click_bounds": self._execute_click_bounds,
             "type_text": self._execute_type_text,
+            "swipe_up": self._execute_swipe_up,
+            "swipe_down": self._execute_swipe_down,
+            "swipe_bounds": self._execute_swipe_bounds,
             "long_click_bounds": self._execute_long_click_bounds,
             "double_click_bounds": self._execute_double_click_bounds,
             "drag_bounds": self._execute_drag_bounds,
@@ -436,6 +439,18 @@ class MapperFlowExecutionService:
             return {"success": False}
         return {"success": self.ui.click_bounds(bounds)}
 
+    def _execute_swipe_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
+        # a directional swipe anchored to one element (not the whole screen, unlike swipe_up/
+        # swipe_down): the touch equivalent of dragging with a mouse, needed for gestures an app
+        # only recognizes when they start on a specific element, e.g. swiping a chat message
+        # sideways to reveal its reply action
+        selector = step.selector_json or {}
+        bounds = selector.get("bounds")
+        direction = selector.get("direction")
+        if not bounds or not direction:
+            return {"success": False}
+        return {"success": self.ui.swipe_bounds(bounds, direction, selector.get("distance"))}
+
     def _execute_long_click_bounds(self, step: MapperFlowStep) -> dict[str, Any]:
         # press-and-hold on an exact region: a touchscreen's equivalent of a right-click, the
         # gesture most apps use to surface a contextual menu (reply, forward, pin, delete, ...)
@@ -511,10 +526,18 @@ class MapperFlowExecutionService:
         return {"success": self.ui.type_text(text, clear=bool(selector.get("clear")))}
 
     def _execute_scroll_up(self, step: MapperFlowStep) -> dict[str, Any]:
-        self.ui.swipe_up()
+        self.ui.swipe_down()
         return {"success": True}
 
     def _execute_scroll_down(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.ui.swipe_up()
+        return {"success": True}
+
+    def _execute_swipe_up(self, step: MapperFlowStep) -> dict[str, Any]:
+        self.ui.swipe_up()
+        return {"success": True}
+
+    def _execute_swipe_down(self, step: MapperFlowStep) -> dict[str, Any]:
         self.ui.swipe_down()
         return {"success": True}
 
