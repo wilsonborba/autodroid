@@ -45,7 +45,7 @@ def load_settings() -> Settings:
         log_file=Path(os.getenv("AUTODROID_LOG_FILE", "var/logs/autodroid.log")),
         api_state_file=Path(os.getenv("AUTODROID_API_STATE_FILE", "var/run/api.json")),
         app_timezone=os.getenv("AUTODROID_TIMEZONE", "UTC"),
-        android_serial=os.getenv("ANDROID_SERIAL", "127.0.0.1:5555"),
+        android_serial=os.getenv("ANDROID_SERIAL", "").strip(),
         linkedin_package_name=os.getenv("LINKEDIN_PACKAGE_NAME", "com.linkedin.android"),
         ocr_language=os.getenv("AUTODROID_OCR_LANGUAGE", "en"),
         mapper_auto_remap_enabled=os.getenv("AUTODROID_MAPPER_AUTO_REMAP_ENABLED", "false").lower() == "true",

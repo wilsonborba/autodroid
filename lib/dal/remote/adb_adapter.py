@@ -3,17 +3,59 @@ from __future__ import annotations
 import shlex
 import subprocess
 import time
+from typing import Callable
 
 from lib.core.logs import get_logger
 
 
+def parse_adb_devices(output: str) -> list[str]:
+    devices: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("List of devices attached") or line.startswith("*"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            devices.append(parts[0])
+    return devices
+
+
+def resolve_android_serial(
+    configured_serial: str = "",
+    devices_runner: Callable[[], str] | None = None,
+) -> str:
+    explicit = configured_serial.strip()
+    if explicit:
+        return explicit
+    if devices_runner is None:
+        result = subprocess.run(["adb", "devices"], check=True, capture_output=True, text=True)
+        raw_output = result.stdout
+    else:
+        raw_output = devices_runner()
+    devices = parse_adb_devices(raw_output)
+    if not devices:
+        raise RuntimeError(
+            "No running Android devices found via 'adb devices'. "
+            "Start an emulator or set ANDROID_SERIAL."
+        )
+    if len(devices) > 1:
+        raise RuntimeError(
+            f"Multiple Android devices detected ({', '.join(devices)}); "
+            "refusing to pick randomly. Set ANDROID_SERIAL to choose one."
+        )
+    return devices[0]
+
+
 class AdbAdapter:
-    def __init__(self, serial: str) -> None:
+    def __init__(self, serial: str = "") -> None:
         self.serial = serial
         self.logger = get_logger(__name__)
 
+    def resolve_serial(self) -> str:
+        return resolve_android_serial(self.serial)
+
     def run(self, *args: str) -> str:
-        command = ["adb", "-s", self.serial, *args]
+        command = ["adb", "-s", self.resolve_serial(), *args]
         self.logger.debug("Running adb command: %s", " ".join(command))
         try:
             result = subprocess.run(command, check=True, capture_output=True, text=True)
