@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from lib.core.logs import get_logger
+from lib.dal.remote.adb_adapter import resolve_android_serial
 
 try:
     import uiautomator2 as u2
@@ -14,7 +15,7 @@ except Exception:  # pragma: no cover - optional until runtime
 
 
 class UiAutomatorAdapter:
-    def __init__(self, serial: str) -> None:
+    def __init__(self, serial: str = "") -> None:
         self.serial = serial
         self._device = None
         self.logger = get_logger(__name__)
@@ -27,7 +28,7 @@ class UiAutomatorAdapter:
             return self._device
         if u2 is None:
             raise RuntimeError("uiautomator2 is not available in this environment")
-        self._device = u2.connect(self.serial)
+        self._device = u2.connect(resolve_android_serial(self.serial))
         return self._device
 
     def app_start(self, package_name: str) -> None:
